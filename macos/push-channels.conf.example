@@ -1,0 +1,15 @@
+# push-channels.conf — 推送通道配置（macOS 版）
+# 复制为 push-channels.conf 后修改。至少启用一个通道。
+
+# 启用的通道（空格分隔，可选 bark hayo）
+ENABLED_CHANNELS="bark hayo"
+
+# --- Bark (iOS) ---
+BARK_KEY="在这里填你的Bark key"
+BARK_BASE="https://api.day.app"
+BARK_GROUP="remote-guard"
+
+# --- hayo (微信公众号, https://www.hayo.cn) ---
+# 网页登录后复制 token
+HAYO_TOKEN="在这里填你的hayo token"
+HAYO_BASE="https://hayo.svip8.vip"
