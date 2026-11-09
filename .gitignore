@@ -1,0 +1,7 @@
+# 运行时状态与本地凭据，绝不入库
+push-channels.json
+instant.pid
+instant-state.json
+state.json
+*.log
+*.log.1
