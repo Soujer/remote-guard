@@ -1,0 +1,5 @@
+# macOS shell 脚本必须 LF，否则 bad interpreter
+macos/** text eol=lf
+*.sh text eol=lf
+*.ps1 text eol=crlf
+*.vbs text eol=crlf
