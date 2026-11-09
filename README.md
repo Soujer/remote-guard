@@ -4,6 +4,15 @@
 
 被控检测、无人值守、静默运行、零闪屏。适合"离开工位后想知道有没有人远程我的电脑"的场景。
 
+## 下载
+
+到 [Releases](https://gitee.com/Soujer/remote-guard/releases) 下载对应平台发行版：
+
+| 平台 | 发行包 | 使用 |
+|---|---|---|
+| Windows | `remote-guard-windows-vX.X.zip` | 解压 → 运行 `remote-guard-setup.exe` |
+| macOS | `remote-guard-macos-vX.X.tar.gz` | 解压 → `bash install-macos.sh` |
+
 ## 支持平台
 
 | 平台 | 实现 | 入口 |
@@ -35,12 +44,13 @@
 
 ## 快速开始（Windows）
 
-1. 下载发行版（或 clone 后运行 `remote-guard-setup.exe`）
-2. 配置推送通道（二选一或都要）：
+1. 下载 `remote-guard-windows-vX.X.zip` 并解压（或 clone 仓库）
+2. 运行 `windows/remote-guard-setup.exe`（首次使用 ps1 源码可自行用 ps2exe 打包）
+3. 配置推送通道（二选一或都要）：
    - **Bark**（iOS）：App Store 装 Bark，复制你的 key 填入
    - **hayo**（微信公众号）：点"扫码获取"，微信扫码确认，token 自动填入
-3. 点"测试通道"确认手机能收到
-4. 点"一键部署"完成（自动注册计划任务 + 启动即时监控）
+4. 点"测试通道"确认手机能收到
+5. 点"一键部署"完成（自动注册计划任务 + 启动即时监控）
 
 ## 快速开始（macOS）
 
@@ -77,11 +87,11 @@ bash install-macos.sh         # 测试通道 + 注册 launchd + 启动即时监�
 
 | 文件 | 用途 |
 |---|---|
-| `remote-guard.ps1` | Windows 主检测脚本（计划任务每分钟） |
-| `remote-guard-instant.ps1` | Windows 即时通道常驻进程（2 秒轮询） |
-| `remote-guard-launcher.vbs` | 隐藏启动器（零闪屏） |
-| `remote-guard-instant-launcher.vbs` | 即时进程启动器 |
-| `remote-guard-setup.ps1` / `.exe` | Windows 配置 + 一键部署工具 |
+| `windows/remote-guard.ps1` | Windows 主检测脚本（计划任务每分钟） |
+| `windows/remote-guard-instant.ps1` | Windows 即时通道常驻进程（2 秒轮询） |
+| `windows/remote-guard-launcher.vbs` | 隐藏启动器（零闪屏） |
+| `windows/remote-guard-instant-launcher.vbs` | 即时进程启动器 |
+| `windows/remote-guard-setup.ps1` | Windows 配置 + 一键部署工具源码（发行版含编译好的 exe） |
 | `macos/remote-guard-macos.sh` | macOS 主检测 + 即时通道（单脚本双模式，纯 bash 零依赖） |
 | `macos/install-macos.sh` | macOS 一键部署/卸载（launchd） |
 | `macos/push-channels.conf.example` | macOS 推送通道配置模板 |
