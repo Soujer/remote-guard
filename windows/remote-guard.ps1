@@ -636,6 +636,25 @@ $newEvents = @($events | Where-Object { -not $seenEvents.ContainsKey($_.Key) })
 $controlled = ($findings.Count -gt 0)
 $detailLines = @($findings | ForEach-Object { '· {0}: {1}' -f $_.Tool, $_.Detail })
 
+# ---------- 受控粘滞：防"静态画面/直连休眠"误恢复 ----------
+# 真会话确认后信号可能暂时归零：UU 静态画面时 GPU 编码器不产出（串流 IO 掉到空闲基线），
+# P2P 直连可能被断开省资源——但会话并没有结束！
+# 规则：曾受控时本轮无 finding 不立即解除，需"无任何会话信号"连续 $ReleaseAfterQuietMin 分钟。
+$ReleaseAfterQuietMin = 3
+if (-not $controlled -and $wasControlled -and $state -and $state.since) {
+    try {
+        $quietSince = $null
+        if ($state.quietSince) { try { $quietSince = [datetime]::Parse([string]$state.quietSince) } catch { } }
+        if (-not $quietSince) {
+            $controlled = $true
+            $detailLines = @('· 会话静默观察中（等待确认结束，最长 ' + $ReleaseAfterQuietMin + ' 分钟）')
+        } elseif ((($now - $quietSince).TotalMinutes -lt $ReleaseAfterQuietMin)) {
+            $controlled = $true
+            $detailLines = @('· 会话静默 ' + [int](($now - $quietSince).TotalMinutes) + ' 分钟（< ' + $ReleaseAfterQuietMin + ' 分钟，保持受控）')
+        }
+    } catch { }
+}
+
 # ---------- DryRun：只输出，不推送、不写状态 ----------
 if ($DryRun) {
     if ($controlled) {
@@ -728,13 +747,21 @@ if ($Seed) {
     # 基线模式不改动受控状态，只更新已见事件
     $stateControlled = $wasControlled
     if ($wasControlled -and $state -and $state.since) { $sinceValue = $state.since }
+    if ($wasControlled -and $state -and $state.quietSince) { $quietSinceOut = [string]$state.quietSince }
 } elseif ($controlled) {
     if ($wasControlled -and $state -and $state.since) { $sinceValue = $state.since } else { $sinceValue = $now.ToString('o') }
+    # 受控恢复（本轮有 finding）→ 静默计时清空（quietSinceOut 保持 null）
+} else {
+    # 本轮无 finding: 若之前受控, 记录首轮静默时刻; 若已在静默中且未解除, 保留原值
+    if ($wasControlled -or ($state -and $state.quietSince)) {
+        if ($state -and $state.quietSince) { $quietSinceOut = [string]$state.quietSince } else { $quietSinceOut = $now.ToString('o') }
+    }
 }
 $newState = [ordered]@{
     lastRun    = $now.ToString('o')
     controlled = $stateControlled
     since      = $sinceValue
+    quietSince = $quietSinceOut
     lastNotify = $(if ($lastNotify) { $lastNotify.ToString('o') } else { $null })
     procs      = $procInfo
     streaks    = $newStreaks
