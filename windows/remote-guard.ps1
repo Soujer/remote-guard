@@ -230,6 +230,7 @@ if ($state -and $state.lastNotify) { try { $lastNotify = [datetime]::Parse($stat
 $findings = New-Object System.Collections.ArrayList
 $procInfo = @{}
 $newStreaks = @{}
+$peerStreaksNew = @{}
 
 $allProcs = @(Get-Process -ErrorAction SilentlyContinue)
 $estConns = @()
@@ -346,8 +347,10 @@ foreach ($def in $ToolDefs) {
             $streak = 0
             if ($state -and $state.streaks -and $null -ne $state.streaks.($def.Name)) { $streak = [int]$state.streaks.($def.Name) }
             # 会话文件触发：UU/ToDesk 会话开始时生成或刷新的会话文件。
-            # 红线：UU 在会话【开始】和【结束】都会刷新 ini，文件新鲜 ≠ 会话进行中，
-            # 必须叠加另一"会话在场"证据（高端口直连 / 串流 IO）才触发，否则会把断开误判成新会话。
+            # 红线 1：UU 在会话【开始】和【结束】都会刷新 ini，文件新鲜 ≠ 会话进行中，
+            #         必须叠加另一"会话在场"证据（高端口直连 / 串流 IO）才触发。
+            # 红线 2：手机 UU App 打开时的设备发现/握手会刷新 ini 并建立几秒直连（下轮采样已消失），
+            #         所以直连佐证需"连续两轮在场"——用 peerStreaks 记录直连连续出现轮数。
             if ($def.SessionFiles -and -not $hasSession) {
                 $sessionNetOk = $true
                 if ($def.SessionNeedsNet) {
@@ -359,7 +362,10 @@ foreach ($def in $ToolDefs) {
                     foreach ($sfp in $def.SessionFiles) {
                         $freshFiles = @(Get-Item -Path $sfp -ErrorAction SilentlyContinue | Where-Object { ($now - $_.LastWriteTime).TotalSeconds -le $freshSec })
                         if ($freshFiles.Count -gt 0) {
-                            $hasCorroboration = ($hasPeer -or ($maxIoRate -ge $IoActiveBytesPerMin))
+                            $peerStreakPrev = 0
+                            if ($state -and $state.peerStreaks -and $null -ne $state.peerStreaks.($def.Name)) { $peerStreakPrev = [int]$state.peerStreaks.($def.Name) }
+                            $peerHoldOk = ($peerStreakPrev -ge 1 -and $hasPeer)
+                            $hasCorroboration = ($peerHoldOk -or ($maxIoRate -ge $IoActiveBytesPerMin))
                             if ($hasCorroboration) {
                                 $newest = $freshFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
                                 $hasSession = $true
@@ -376,6 +382,9 @@ foreach ($def in $ToolDefs) {
             # 直连会话 / 会话文件 / 强 IO 信号单次采样即告警
             if ($hasPeer -or $hasSession -or ($hasNet -and $maxIoRate -ge $IoStrongBytesPerMin)) { $streak = [Math]::Max($streak, $CpuStreakNeeded) }
             $newStreaks[$def.Name] = $streak
+            # 维护直连连续轮数（供会话文件触发的"直连已持续"佐证）
+            if (-not $peerStreaksNew.ContainsKey($def.Name)) { $peerStreaksNew[$def.Name] = 0 }
+            if ($hasPeer) { $peerStreaksNew[$def.Name] = $peerStreaksNew[$def.Name] + 1 } else { $peerStreaksNew[$def.Name] = 0 }
             if ($streak -ge $CpuStreakNeeded) {
                 $netText = $(if ($hasNet) { '有远程连接' } else { '无远程连接' })
                 if ($hasPeer)        { $detailText = '被控直连会话 (' + $peerText + ')' }
@@ -729,6 +738,7 @@ $newState = [ordered]@{
     lastNotify = $(if ($lastNotify) { $lastNotify.ToString('o') } else { $null })
     procs      = $procInfo
     streaks    = $newStreaks
+    peerStreaks = $peerStreaksNew
     uuVDisplay = $uuVDisplayActive
     sessionSignal = $sessionSignalOut
     svcStates  = $svcStatesNew

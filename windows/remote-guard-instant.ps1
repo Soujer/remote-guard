@@ -148,6 +148,10 @@ $lastIniMtimeSeen = $null
 $ioSnapPrev = $null
 $ioSnapPrevTime = $null
 $pollCount = 0
+# 流量确认状态：区分握手(无流量,几秒即逝)与真会话(秒级 MB 传输)
+$PeerFlowBytes = 512KB        # 3 秒观察窗口内最小传输量
+$PeerPendingTimeoutSec = 12   # 直连出现超过此秒数仍无流量 → 判定握手, 放弃
+$peerPending = $null          # @{ io0 = IO快照; seen = 首见时间; eps = 端点文本 }
 
 while ($true) {
     try {
@@ -158,24 +162,54 @@ while ($true) {
         $trigger = $null
         $detail  = ''
 
-        # UU：GameViewerServer 高端口直连
+        # UU：GameViewerServer 高端口直连 + 流量确认
+        # 区分"握手"与"真会话"的本质信号：流量。
+        # - 手机 UU App 打开的设备发现/信令握手：直连出现但传输量趋近于零，几秒后断开
+        # - 真被控会话：直连建立后立刻串流，秒级即有 MB 级传输
+        # 策略：直连出现 → 快照进程 IO → 下一轮(2s)复测 → 传输 ≥512KB 判真会话 → 立即告警
+        # 实时性：总延迟 = 轮询 2s + 流量窗口 2~3s ≈ 5 秒
         $uuDirectCount = 0
         $uuProc = Get-Process -Name 'GameViewerServer' -ErrorAction SilentlyContinue | Select-Object -First 1
+        $uuIoNow = $null
         if ($uuProc) {
             $c = @(Get-NetTCPConnection -State Established -OwningProcess $uuProc.Id -ErrorAction SilentlyContinue | Where-Object { $PeerPortExclude -notcontains $_.RemotePort -and (Test-RemoteAddress $_.RemoteAddress) })
             $uuDirectCount = $c.Count
-            if ($c.Count -gt 0) {
-                $trigger = 'UU远程'
-                $detail  = '被控直连会话 (' + (@($c | ForEach-Object { $_.RemoteAddress + ':' + $_.RemotePort }) -join ', ') + ')'
+            try {
+                $pf = Get-CimInstance Win32_PerfRawData_PerfProc_Process -Filter "IDProcess=$($uuProc.Id)" -ErrorAction Stop | Select-Object -First 1
+                if ($pf) { $uuIoNow = [double]$pf.IODataBytesPersec }
+            } catch { }
+        }
+
+        if ($uuDirectCount -gt 0) {
+            if ($null -eq $peerPending) {
+                $peerPending = @{ io0 = $(if ($null -ne $uuIoNow) { $uuIoNow } else { 0 }); seen = $now; eps = (@($c | ForEach-Object { $_.RemoteAddress + ':' + $_.RemotePort }) -join ', ') }
+            } else {
+                $flow = 0
+                if ($null -ne $uuIoNow -and $null -ne $peerPending.io0) {
+                    $flow = $uuIoNow - [double]$peerPending.io0
+                    if ($flow -lt 0) { $flow = 0 }
+                }
+                $ageSec = ($now - $peerPending.seen).TotalSeconds
+                if ($flow -ge $PeerFlowBytes) {
+                    $trigger = 'UU远程'
+                    $detail  = '被控直连会话 (3s 传输 ' + [math]::Round($flow/1KB) + 'KB: ' + $peerPending.eps + ')'
+                    $peerPending = $null
+                } elseif ($ageSec -ge $PeerPendingTimeoutSec) {
+                    $peerPending = $null   # 握手: 超时无流量, 静默放弃
+                }
             }
+        } else {
+            $peerPending = $null   # 直连消失（握手的典型结局）
         }
 
         # UU：会话 ini 刚生成（纯中继会话兜底）。
         # 红线：会话【开始】和【结束】都会刷新 ini，文件新鲜 ≠ 会话进行中，
-        #       必须叠加高端口直连佐证；断开瞬间直连已消失，不会再误报。
-        if (-not $trigger -and $UuSessionGlob) {
+        #       必须叠加高端口直连佐证（流量确认观察中）；断开瞬间直连已消失，不会再误报。
+        if (-not $trigger -and $UuSessionGlob -and $peerPending -and $uuDirectCount -gt 0) {
             $ini = Get-ChildItem -Path $UuSessionGlob -File -ErrorAction SilentlyContinue | Where-Object { ($now - $_.LastWriteTime).TotalSeconds -le $IniFreshSec } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($ini -and $uuDirectCount -gt 0) { $trigger = 'UU远程'; $detail = '会话文件刚生成 (' + $ini.Name + ')' }
+            if ($ini) {
+                # ini 新鲜 + 直连在流量确认观察中 → 下轮流量达标会自动触发, 此处不提前告警
+            }
         }
 
         # ToDesk：会话 xlog 刚生成 + 进程已建立远程连接
