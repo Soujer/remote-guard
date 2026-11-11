@@ -11,17 +11,12 @@
 #   1) RDP：qwinsta 中存在活动的 rdp-tcp#N 会话，或 3389 存在已建立的远程连接
 #   2) 第三方远控软件（ToDesk / 向日葵 / UU远程 / AnyDesk / TeamViewer /
 #      RustDesk / Parsec / Chrome远程桌面 / VNC）：
-#      - presence 模式：进程存在即视为会话进行中（快速助手、Windows 远程协助）
+#      - 快速助手、Windows 远程协助也需活动佐证，打开窗口不代表已建立会话
 #      - connection 模式：进程存在且有已建立的远程 TCP 连接（VNC）
-#      - activity 模式：CPU 持续占用（≥1.5 秒/分钟，连续 2 次采样）、
-#        或进程 IO ≥1MB/分钟（串流流量，连续 2 次）、或强 IO ≥5MB/分钟；
-#        UU远程额外检测被控端与控端的高端口直连（空闲时只有 80/443 信令）
-#      - 会话文件触发：UU（config\server\*.ini）/ ToDesk（session*.xlog）会话开始时
-#        生成/刷新的会话文件，在新鲜窗口内出现即告警（ToDesk 需已建立连接才生效）
-#      - 远控服务状态：ToDesk_Service / SunloginService 由 Stopped 转为 Running 即告警
-#      - RDP 开关盯防：fDenyTSConnections 注册表值被改动即告警（远端恶意开 RDP 的关键动作）
-#      - 输入注入传感器（不记录按键内容，只统计输入 tick / 锁屏状态）：
-#        锁屏或安全桌面下仍有输入注入即告警；真实受控信号后 6 分钟内仍有输入也告警
+#      - activity 模式：同一进程连续两轮具有连接、IO 和直连/会话文件/CPU 佐证
+#        进程 IO 包含磁盘操作，不能单独认定为网络串流；单次握手不告警
+#      - 服务启动和 RDP 开关仅记诊断日志，不代表已建立受控会话
+#      - 输入时间戳仅作诊断，不能区分本机键鼠和远程输入，不参与受控判定
 #   3) 病毒性远程 / 未知远控（事件型，不改变受控状态）：
 #      - 内网穿透/隧道工具进程（frpc/nps/ngrok/chisel/cloudflared/gost 等）
 #      - 可疑进程链（Office/浏览器/IM 拉起 cmd/powershell/mshta 等脚本宿主）
@@ -45,17 +40,13 @@ $LogFile   = Join-Path $Root 'remote-guard.log'
 # （推送通道统一走 push-channels.json 配置，见 Send-Push）
 
 # ---------- 检测阈值 ----------
-$CpuActiveRate        = 1.5   # 活动判定：CPU 秒 / 分钟
 $CpuActiveRateWithNet = 1.0   # 有远程连接时的宽松阈值（80/443 常驻信令会干扰，不能设太低）
 $CpuStreakNeeded      = 2     # 连续命中次数（每分钟一次采样）
 $IoActiveBytesPerMin  = 1MB   # 串流流量判定：进程 IO ≥1 MB/分钟（空闲仅几 KB）
-$IoStrongBytesPerMin  = 5MB   # 强信号：≥5 MB/分钟，单次采样即告警
 $RemindMinutes        = 30    # 持续受控的提醒间隔（分钟）
 $NotifyRecovery       = $true # 解除时是否推送恢复消息
-$SessionLatchMinutes  = 6     # 受控信号锁存窗口（分钟）：真实会话信号刷新 sessionSignal，随后该窗口内仍有输入视为会话注入
 $InputWindowSec       = 25    # 输入注入传感器采样窗口（秒，逐秒采样）
-$InputLockedMinTicks  = 4     # 锁屏注入判定所需最少输入 tick（窗口内）
-# 远控服务状态（Manual 服务不会自己启动：Stopped -> Running 即强信号）
+# 远控服务状态仅供诊断，升级/自启也会启动服务
 $SvcDefs = @(
     @{ Tool = 'ToDesk'; Svc = 'ToDesk_Service' },
     @{ Tool = '向日葵'; Svc = 'SunloginService' }
@@ -89,8 +80,8 @@ $ToolDefs += @(
     @{ Name = 'Parsec';          Procs = @('parsecd');                                                     Mode = 'activity' },
     @{ Name = 'Chrome远程桌面';  Procs = @('remoting_host','remoting_desktop');                             Mode = 'activity' },
     @{ Name = 'VNC';             Procs = @('winvnc','vncserver','tvnserver');                              Mode = 'connection' },
-    @{ Name = '快速助手';        Procs = @('QuickAssist');                                                 Mode = 'presence' },
-    @{ Name = 'Windows远程协助'; Procs = @('msra');                                                        Mode = 'presence' }
+    @{ Name = '快速助手';        Procs = @('QuickAssist');                                                 Mode = 'activity' },
+    @{ Name = 'Windows远程协助'; Procs = @('msra');                                                        Mode = 'activity' }
 )
 
 # ---------- 病毒性远程 / 未知远控配置 ----------
@@ -189,11 +180,10 @@ function Invoke-Bark([string]$Title, [string]$Body) {
 }
 
 function Test-RemoteAddress([string]$Addr) {
-    if (-not $Addr) { return $false }
-    if ($Addr -eq '127.0.0.1' -or $Addr -eq '::1' -or $Addr -eq '0.0.0.0' -or $Addr -eq '::') { return $false }
-    if ($Addr -like '127.*') { return $false }
-    if ($Addr -like 'fe80::*') { return $false }
-    return $true
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Addr, [ref]$ip)) { return $false }
+    if ($ip.IsIPv4MappedToIPv6) { $ip = $ip.MapToIPv4() }
+    return -not ([System.Net.IPAddress]::IsLoopback($ip) -or $ip.Equals([System.Net.IPAddress]::Any) -or $ip.Equals([System.Net.IPAddress]::IPv6Any))
 }
 
 function Get-ShortText([string]$Text, [int]$Max) {
@@ -225,6 +215,13 @@ $wasControlled = $false
 if ($state -and $state.controlled) { $wasControlled = $true }
 $lastNotify = $null
 if ($state -and $state.lastNotify) { try { $lastNotify = [datetime]::Parse($state.lastNotify) } catch { } }
+$instant = $null
+$instantFresh = $false
+try {
+    $instant = Get-Content -LiteralPath (Join-Path $Root 'instant-state.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+    $instantAge = ($now - [datetime]::Parse($instant.updated)).TotalSeconds
+    $instantFresh = ($instant.schema -eq 2 -and $instantAge -ge 0 -and $instantAge -le 15)
+} catch { }
 
 # ---------- 采集 ----------
 $findings = New-Object System.Collections.ArrayList
@@ -234,15 +231,24 @@ $peerStreaksNew = @{}
 
 $allProcs = @(Get-Process -ErrorAction SilentlyContinue)
 $estConns = @()
-try { $estConns = @(Get-NetTCPConnection -State Established -ErrorAction SilentlyContinue) } catch { }
+try { $estConns = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Established' }) } catch {
+    if ($DryRun) { throw }
+    Write-Log '网络采样失败，保留上轮状态，不判定解除'
+    return
+}
 
-# 进程 IO 累计快照（用于识别串流流量；UU/GPU 编码时 CPU 很低，但串流 IO 是 MB 级）
+# 进程 IO 累计快照（包含磁盘与设备操作，须配合连接证据使用）
 $ioByPid = @{}
 try {
-    foreach ($pf in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction SilentlyContinue)) {
+    foreach ($pf in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction Stop)) {
         if ($pf.IDProcess -gt 0) { $ioByPid[[int]$pf.IDProcess] = [double]$pf.IODataBytesPersec }
     }
-} catch { }
+    if ($ioByPid.Count -eq 0) { throw '性能采样为空' }
+} catch {
+    if ($DryRun) { throw }
+    Write-Log '活动采样失败，保留上轮状态，不判定解除'
+    return
+}
 
 # UU 虚拟显示器状态（被控会话可能激活；仅用于 false->true 跳变信号，避免常驻误报）
 $uuVDisplayActive = $false
@@ -260,12 +266,12 @@ $rdpDenyPrevVal = $null
 if ($state -and $null -ne $state.rdpDenyPrev) { try { $rdpDenyPrevVal = [int]$state.rdpDenyPrev } catch { } }
 if ($null -ne $rdpDenyNow -and $null -ne $rdpDenyPrevVal -and $rdpDenyNow -ne $rdpDenyPrevVal) {
     $denyMeaning = $(if ($rdpDenyNow -eq 0) { 'RDP 已被开启' } else { 'RDP 已被关闭' })
-    [void]$findings.Add([pscustomobject]@{ Tool = 'RDP'; Pid = '-'; Detail = ('RDP 开关变更: fDenyTSConnections {0} -> {1}，{2}' -f $rdpDenyPrevVal, $rdpDenyNow, $denyMeaning); Real = $true })
+    if (-not $DryRun) { Write-Log ('诊断: RDP 开关变更 {0} -> {1}，{2}（不代表会话建立）' -f $rdpDenyPrevVal, $rdpDenyNow, $denyMeaning) }
 }
 try {
     $qw = @(qwinsta 2>$null)
     foreach ($line in $qw) {
-        if ($line -match 'rdp-tcp#\d+' -and $line -notmatch '(?i)断开|Disc|侦听|Listen|连接|Conn\b') {
+        if ($line -match '(?i)rdp-tcp#\d+\s+.+?\s+\d+\s+(Active|活动)\b') {
             $rdpDetail += '存在活动的 RDP 会话'
             break
         }
@@ -279,16 +285,17 @@ if ($rdpDetail.Count -gt 0) {
 
 # --- 2) 第三方远控工具 ---
 foreach ($def in $ToolDefs) {
+    # 即时通道对这两种工具负责完整会话周期，主任务共用结果，避免重复告警和相反状态。
+    if ($instantFresh -and $def.Name -in @('UU远程','ToDesk')) {
+        if ($instant.activeTools -contains $def.Name) {
+            [void]$findings.Add([pscustomobject]@{ Tool = $def.Name; Pid = '-'; Detail = '即时通道已确认会话（含断开静默观察期）'; Real = $true })
+        }
+        continue
+    }
     $procs = @($allProcs | Where-Object { $def.Procs -contains $_.Name })
     if ($procs.Count -eq 0) { $newStreaks[$def.Name] = 0; continue }
 
     switch ($def.Mode) {
-        'presence' {
-            foreach ($p in $procs) {
-                [void]$findings.Add([pscustomobject]@{ Tool = $def.Name; Pid = $p.Id; Detail = '进程正在运行（会话型工具）'; Real = $true })
-                $procInfo[[string]$p.Id] = @{ name = $p.Name; cpu = $(if ($null -ne $p.CPU) { [double]$p.CPU } else { 0 }); io = $(if ($ioByPid.ContainsKey([int]$p.Id)) { $ioByPid[[int]$p.Id] } else { $null }) }
-            }
-        }
         'connection' {
             foreach ($p in $procs) {
                 $conns = @($estConns | Where-Object { $_.OwningProcess -eq $p.Id -and (Test-RemoteAddress $_.RemoteAddress) })
@@ -300,104 +307,67 @@ foreach ($def in $ToolDefs) {
             }
         }
         'activity' {
-            # CpuRule=$false：常驻信令型客户端（向日葵/UU/RustDesk 带 443 心跳）的后台 CPU 空转
-            # 会造成假警报，这类工具只信 IO 串流流量 / 高端口直连 / 会话文件
-            $cpuRuleOk = $true
-            if ($null -ne $def.CpuRule) { $cpuRuleOk = [bool]$def.CpuRule }
-            $maxRate = 0.0
-            $maxIoRate = 0.0
-            $bestPid = $procs[0].Id
-            $hasNet = $false
-            $hasPeer = $false
-            $peerText = ''
+            $newStreaks[$def.Name] = 0
+            $peerStreaksNew[$def.Name] = 0
             $hasSession = $false
-            $sessionText = ''
+            if ($def.SessionFiles) {
+                foreach ($sfp in $def.SessionFiles) {
+                    $fresh = @(Get-Item -Path $sfp -ErrorAction SilentlyContinue | Where-Object {
+                        $ageSec = ($now - $_.LastWriteTime).TotalSeconds
+                        $ageSec -ge 0 -and $ageSec -le $def.SessionFreshSec
+                    })
+                    if ($fresh.Count -gt 0) { $hasSession = $true }
+                }
+            }
             foreach ($p in $procs) {
-                $rate = 0.0
-                $ioRate = 0.0
-                if ($elapsedMin -ge 0.5 -and $state -and $state.procs) {
-                    $prev = $state.procs.([string]$p.Id)
-                    if ($prev) {
-                        if ($null -ne $prev.cpu) {
-                            $delta = [double]$p.CPU - [double]$prev.cpu
-                            if ($delta -lt 0) { $delta = 0 }
-                            $rate = $delta / $elapsedMin
-                        }
-                        if ($null -ne $prev.io -and $ioByPid.ContainsKey([int]$p.Id)) {
-                            $ioDelta = [double]$ioByPid[[int]$p.Id] - [double]$prev.io
-                            if ($ioDelta -lt 0) { $ioDelta = 0 }
-                            $ioRate = $ioDelta / $elapsedMin
-                        }
-                    }
-                }
-                if ($rate -gt $maxRate) { $maxRate = $rate; $bestPid = $p.Id }
-                if ($ioRate -gt $maxIoRate) { $maxIoRate = $ioRate; $bestPid = $p.Id }
+                $key = [string]$p.Id
+                $started = $null
+                try { $started = $p.StartTime.ToUniversalTime().ToString('o') } catch { }
+                $cpu = $(if ($null -ne $p.CPU) { [double]$p.CPU } else { 0 })
+                $io = $(if ($ioByPid.ContainsKey([int]$p.Id)) { $ioByPid[[int]$p.Id] } else { $null })
                 $conns = @($estConns | Where-Object { $_.OwningProcess -eq $p.Id -and (Test-RemoteAddress $_.RemoteAddress) })
-                if ($conns.Count -gt 0) { $hasNet = $true }
-                # 被控端与控端的高端口直连（UU: GameViewerServer），空闲时只有 80/443 信令
-                if ($def.PeerProcs -and ($def.PeerProcs -contains $p.Name)) {
-                    $peer = @($conns | Where-Object { $PeerPortExclude -notcontains $_.RemotePort })
-                    if ($peer.Count -gt 0) {
-                        $hasPeer = $true
-                        $peerText = @($peer | ForEach-Object { $_.RemoteAddress + ':' + $_.RemotePort }) -join ', '
+                $peer = @($conns | Where-Object { $PeerPortExclude -notcontains $_.RemotePort })
+                $cpuRate = 0.0
+                $ioRate = 0.0
+                $prev = $null
+                if ($state -and $state.procs) { $prev = $state.procs.$key }
+                # 丢弃跨进程重启、PID 复用、休眠恢复和过期的采样。
+                $valid = ($elapsedMin -ge 0.5 -and $elapsedMin -le 3 -and $started -and $prev -and $prev.started -eq $started -and $prev.name -eq $p.Name)
+                if ($valid) {
+                    $cpuRate = [Math]::Max(0, ($cpu - [double]$prev.cpu) / $elapsedMin)
+                    if ($null -ne $io -and $null -ne $prev.io) {
+                        $ioRate = [Math]::Max(0, ($io - [double]$prev.io) / $elapsedMin)
                     }
                 }
-                $procInfo[[string]$p.Id] = @{ name = $p.Name; cpu = $(if ($null -ne $p.CPU) { [double]$p.CPU } else { 0 }); io = $(if ($ioByPid.ContainsKey([int]$p.Id)) { $ioByPid[[int]$p.Id] } else { $null }) }
-            }
-            $streak = 0
-            if ($state -and $state.streaks -and $null -ne $state.streaks.($def.Name)) { $streak = [int]$state.streaks.($def.Name) }
-            # 会话文件触发：UU/ToDesk 会话开始时生成或刷新的会话文件。
-            # 红线 1：UU 在会话【开始】和【结束】都会刷新 ini，文件新鲜 ≠ 会话进行中，
-            #         必须叠加另一"会话在场"证据（高端口直连 / 串流 IO）才触发。
-            # 红线 2：手机 UU App 打开时的设备发现/握手会刷新 ini 并建立几秒直连（下轮采样已消失），
-            #         所以直连佐证需"连续两轮在场"——用 peerStreaks 记录直连连续出现轮数。
-            if ($def.SessionFiles -and -not $hasSession) {
-                $sessionNetOk = $true
-                if ($def.SessionNeedsNet) {
-                    $sessionNetOk = $hasNet
+                # 每个 PID 独立关联连接、活动和连续次数，不把不同进程的证据拼接。
+                $hasPeer = ($peer.Count -gt 0)
+                if ($def.PeerProcs) { $hasPeer = ($hasPeer -and $def.PeerProcs -contains $p.Name) }
+                $cpuOk = ($def.CpuRule -ne $false -and $cpuRate -ge $CpuActiveRateWithNet)
+                $support = ($hasPeer -or $hasSession -or $cpuOk)
+                $candidate = ($valid -and $conns.Count -gt 0 -and $ioRate -ge $IoActiveBytesPerMin -and $support)
+                $peerKeys = @($peer | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort })
+                $confirmedPeers = @()
+                $continuing = $false
+                if ($valid -and $prev.confirmedPeers) {
+                    $confirmedPeers = @($prev.confirmedPeers)
+                    $continuing = (@($peerKeys | Where-Object { $prev.confirmedPeers -contains $_ }).Count -gt 0)
                 }
-                if ($sessionNetOk) {
-                    $freshSec = 90
-                    if ($def.SessionFreshSec) { $freshSec = [int]$def.SessionFreshSec }
-                    foreach ($sfp in $def.SessionFiles) {
-                        $freshFiles = @(Get-Item -Path $sfp -ErrorAction SilentlyContinue | Where-Object { ($now - $_.LastWriteTime).TotalSeconds -le $freshSec })
-                        if ($freshFiles.Count -gt 0) {
-                            $peerStreakPrev = 0
-                            if ($state -and $state.peerStreaks -and $null -ne $state.peerStreaks.($def.Name)) { $peerStreakPrev = [int]$state.peerStreaks.($def.Name) }
-                            $peerHoldOk = ($peerStreakPrev -ge 1 -and $hasPeer)
-                            $hasCorroboration = ($peerHoldOk -or ($maxIoRate -ge $IoActiveBytesPerMin))
-                            if ($hasCorroboration) {
-                                $newest = $freshFiles | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-                                $hasSession = $true
-                                $sessionText = ('{0}，{1:N0} 秒前' -f $newest.Name, (($now - $newest.LastWriteTime).TotalSeconds))
-                            }
-                        }
-                    }
+                $streak = 0
+                if ($candidate) { $streak = 1 + [int]$prev.confirmations }
+                if ($continuing) { $streak = [Math]::Max($streak, $CpuStreakNeeded) }
+                if ($candidate -and $streak -ge $CpuStreakNeeded) { $confirmedPeers = $peerKeys }
+                $procInfo[$key] = @{ name = $p.Name; started = $started; cpu = $cpu; io = $io; confirmations = $streak; confirmedPeers = $confirmedPeers }
+                $newStreaks[$def.Name] = [Math]::Max($newStreaks[$def.Name], $streak)
+                if ($hasPeer) { $peerStreaksNew[$def.Name] = $streak }
+                if ($streak -ge $CpuStreakNeeded) {
+                    $detail = $(if ($continuing) { '已确认会话连接仍在（静态画面无需持续流量）' } else { '同一进程连续 {0} 轮连接与活动确认，IO {1:N1} MB/分钟' -f $streak, ($ioRate / 1MB) })
+                    [void]$findings.Add([pscustomobject]@{ Tool = $def.Name; Pid = $p.Id; Detail = $detail; Real = $true })
                 }
-            }
-            # 会话级信号：直连 / 会话文件 / 串流 IO；纯 CPU 突发不算（也不许喂会话锁存）
-            $realThis = ($hasPeer -or $hasSession -or ($maxIoRate -ge $IoActiveBytesPerMin))
-            $active = ($maxIoRate -ge $IoActiveBytesPerMin) -or $hasPeer -or $hasSession -or ($cpuRuleOk -and ($maxRate -ge $CpuActiveRate -or ($hasNet -and $maxRate -ge $CpuActiveRateWithNet)))
-            if ($active) { $streak++ } else { $streak = 0 }
-            # 直连会话 / 会话文件 / 强 IO 信号单次采样即告警
-            if ($hasPeer -or $hasSession -or ($hasNet -and $maxIoRate -ge $IoStrongBytesPerMin)) { $streak = [Math]::Max($streak, $CpuStreakNeeded) }
-            $newStreaks[$def.Name] = $streak
-            # 维护直连连续轮数（供会话文件触发的"直连已持续"佐证）
-            if (-not $peerStreaksNew.ContainsKey($def.Name)) { $peerStreaksNew[$def.Name] = 0 }
-            if ($hasPeer) { $peerStreaksNew[$def.Name] = $peerStreaksNew[$def.Name] + 1 } else { $peerStreaksNew[$def.Name] = 0 }
-            if ($streak -ge $CpuStreakNeeded) {
-                $netText = $(if ($hasNet) { '有远程连接' } else { '无远程连接' })
-                if ($hasPeer)        { $detailText = '被控直连会话 (' + $peerText + ')' }
-                elseif ($hasSession) { $detailText = '会话文件刚生成/刷新 (' + $sessionText + ')' }
-                elseif ($maxIoRate -ge $IoActiveBytesPerMin) { $detailText = '串流流量 IO {0:N1} MB/分钟，{1}' -f ($maxIoRate / 1MB), $netText }
-                else                 { $detailText = 'CPU {0:N1} 秒/分钟，IO {1:N1} MB/分钟，{2}' -f $maxRate, ($maxIoRate / 1MB), $netText }
-                [void]$findings.Add([pscustomobject]@{ Tool = $def.Name; Pid = $bestPid; Detail = $detailText; Real = $realThis })
             }
         }
     }
 }
-
-# --- 2b) 远控服务状态：Manual 服务突发启动（Stopped->Running）= 可能有人正要控制 ---
+# --- 2b) 服务状态变更仅供诊断，不能据此认定会话建立 ---
 $svcStatesNew = @{}
 foreach ($sd in $SvcDefs) {
     $sv = Get-Service -Name $sd.Svc -ErrorAction SilentlyContinue
@@ -410,10 +380,10 @@ foreach ($sd in $SvcDefs) {
     }
     $firedOut = $prevFired
     if ($sv -and $curStatus -eq 'Running' -and $prevStatus -and $prevStatus -ne 'Running') {
-        # 转变即触发一次；5 分钟内不重复触发（防服务抖动反复提醒）
+        # 5 分钟内只记录一次，避免服务抖动反复刷日志。
         $recent = ($prevFired -and (($now - $prevFired).TotalMinutes -lt 5))
         if (-not $recent) {
-            [void]$findings.Add([pscustomobject]@{ Tool = $sd.Tool; Pid = '-'; Detail = ('远控服务刚启动: {0} 由 {1} 转为 Running' -f $sd.Svc, $prevStatus); Real = $true })
+            if (-not $DryRun) { Write-Log ('诊断: 服务 {0} 由 {1} 转为 Running（不代表会话建立）' -f $sd.Svc, $prevStatus) }
             $firedOut = $now.ToString('o')
         }
     }
@@ -421,19 +391,12 @@ foreach ($sd in $SvcDefs) {
     $svcStatesNew[$sd.Tool] = @{ state = $curStatus; fired = $firedOut }
 }
 
-# --- 2c) 真实会话锁存：本轮存在受控迹象时刷新 sessionSignal（供输入传感器规则 ② 使用） ---
+# 本轮的会话时间仅来自已确认连接，不继承旧输入锁存。
 $realSession = (@($findings | Where-Object { $_.Real }).Count -gt 0)
-$sessionSignalOut = $null
-if ($realSession) {
-    $sessionSignalOut = $now.ToString('o')
-} elseif ($state -and $state.sessionSignal) {
-    try {
-        $ssPrev = [datetime]::Parse([string]$state.sessionSignal)
-        if (($now - $ssPrev).TotalMinutes -le $SessionLatchMinutes) { $sessionSignalOut = [string]$state.sessionSignal }
-    } catch { }
-}
-
+$sessionSignalOut = $(if ($realSession) { $now.ToString('o') } else { $null })
 # --- 2d) 输入注入传感器（红线：不记录按键内容，只统计输入 tick 与锁屏状态） ---
+# 只在诊断时采样，常规轮询无需再等待 25 秒输入窗口。
+if ($DryRun) {
 $sensorReady = $false
 try {
     if (-not ('RemoteGuardInputSensor' -as [type])) {
@@ -501,26 +464,10 @@ if ($sensorReady) {
     $sensorInjTicks = $injTicks
     $sensorLockTicks = $lockTicks
     $sensorLocked = ($lockTicks -gt 0)
-    # 规则①：窗口始末均处于锁屏/安全桌面，却仍有输入流入 => 必然是异地/后台注入
-    if ($lockStart -and $lockEnd -and $injTicks -ge $InputLockedMinTicks) {
-        [void]$findings.Add([pscustomobject]@{ Tool = '输入注入'; Pid = '-'; Detail = ('锁屏/安全桌面下检测到输入注入 (窗口 {0}s，输入 tick {1})' -f $InputWindowSec, $injTicks); Real = $true })
-    }
-    # 规则②：近 6 分钟内存在真实受控信号，且本窗口仍有输入流入 => 会话仍在被操作。
-    # 仅用于"续受控"（wasControlled=true 时防误恢复）；不在受控状态后突然出现输入时新建警报，
-    # 否则真实会话结束后的本地打字会在 6 分钟内反复触发新告警。
-    $ssFresh = $false
-    $ssDt = $null
-    if ($wasControlled -and $state -and $state.sessionSignal) {
-        try {
-            $ssDt = [datetime]::Parse([string]$state.sessionSignal)
-            if (($now - $ssDt).TotalMinutes -le $SessionLatchMinutes) { $ssFresh = $true }
-        } catch { }
-    }
-    if ($ssFresh -and $injTicks -ge 2) {
-        [void]$findings.Add([pscustomobject]@{ Tool = '输入注入'; Pid = '-'; Detail = ('受控会话信号 {0:N1} 分钟前，本窗口仍有输入流入 (tick {1})' -f (($now - $ssDt).TotalMinutes), $injTicks); Real = $true })
-    }
+    # GetLastInputInfo 只提供输入时间，不说明输入来源；锁屏、UAC 和本机打字均不能证明远控。
+    # 保留采样用于 DryRun 校准，不产生 finding，也不刷新会话时间。
 }
-
+}
 # --- 3) 病毒性远程 / 未知远控（事件型，不参与受控状态） ---
 $events = New-Object System.Collections.ArrayList
 
@@ -635,6 +582,7 @@ $newEvents = @($events | Where-Object { -not $seenEvents.ContainsKey($_.Key) })
 
 $controlled = ($findings.Count -gt 0)
 $detailLines = @($findings | ForEach-Object { '· {0}: {1}' -f $_.Tool, $_.Detail })
+$instantOwnsCurrent = ($instantFresh -and $controlled -and @($findings | Where-Object { $instant.notifiedTools -notcontains $_.Tool }).Count -eq 0)
 
 # ---------- 受控粘滞：防"静态画面/直连休眠"误恢复 ----------
 # 真会话确认后信号可能暂时归零：UU 静态画面时 GPU 编码器不产出（串流 IO 掉到空闲基线），
@@ -642,7 +590,7 @@ $detailLines = @($findings | ForEach-Object { '· {0}: {1}' -f $_.Tool, $_.Detai
 # 规则：曾受控时本轮无 finding 不立即解除，需"无任何会话信号"连续 $ReleaseAfterQuietMin 分钟。
 $ReleaseAfterQuietMin = 3
 $stickyHeld = $false   # 本轮是否为"粘滞保持"（无 finding 但因静默期未满而保持受控）
-if (-not $controlled -and $wasControlled -and $state -and $state.since) {
+if (-not $controlled -and $wasControlled -and $state -and $state.since -and -not ($instantFresh -and $state.instantOwned)) {
     try {
         $quietSince = $null
         if ($state.quietSince) { try { $quietSince = [datetime]::Parse([string]$state.quietSince) } catch { } }
@@ -706,7 +654,10 @@ $body = '检测到本机可能正被远程控制：' + "`r`n" + ($detailLines -j
 if (-not $Seed) {
     if ($controlled) {
         $needNotify = $false
-        if (-not $wasControlled) { $needNotify = $true }
+        if (-not $wasControlled) {
+            if ($instantOwnsCurrent) { $lastNotify = [datetime]::Parse($instant.lastAlert) }
+            else { $needNotify = $true }
+        }
         elseif ($null -eq $lastNotify -or ($now - $lastNotify).TotalMinutes -ge $RemindMinutes) { $needNotify = $true }
 
         if ($needNotify) {
@@ -720,7 +671,7 @@ if (-not $Seed) {
             Write-Log ('仍在受控（未到提醒间隔）: ' + ($detailLines -join ' | '))
         }
     } else {
-        if ($wasControlled -and $NotifyRecovery) {
+        if ($wasControlled -and $NotifyRecovery -and -not ($instantFresh -and $state.instantOwned)) {
             $ok = Invoke-Bark '远程控制已解除' ('本机远程控制迹象已消失。主机: ' + $env:COMPUTERNAME + '  时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
             if ($ok) { $lastNotify = $now }
             Write-Log ('已恢复: ' + $(if ($ok) { '已推送' } else { '推送失败' }))
@@ -769,6 +720,8 @@ if ($Seed) {
 $newState = [ordered]@{
     lastRun    = $now.ToString('o')
     controlled = $stateControlled
+    instantOwned = $instantOwnsCurrent
+    tools      = @($findings | ForEach-Object { $_.Tool } | Select-Object -Unique)
     since      = $sinceValue
     quietSince = $quietSinceOut
     lastNotify = $(if ($lastNotify) { $lastNotify.ToString('o') } else { $null })
@@ -793,7 +746,11 @@ try {
     $instantAlive = $false
     if (Test-Path -LiteralPath $pidFile) {
         $ipid = Get-Content -LiteralPath $pidFile -ErrorAction SilentlyContinue
-        if ($ipid -and (Get-Process -Id ([int]$ipid) -ErrorAction SilentlyContinue)) { $instantAlive = $true }
+        if ($ipid -match '^\d+$') {
+            $guardProc = Get-CimInstance Win32_Process -Filter ('ProcessId=' + [int]$ipid) -ErrorAction SilentlyContinue
+            $expected = Join-Path $Root 'remote-guard-instant.ps1'
+            $instantAlive = ($guardProc -and $guardProc.Name -match '^(powershell|pwsh)\.exe$' -and $guardProc.CommandLine -like ('*' + $expected + '*'))
+        }
     }
     if (-not $instantAlive) {
         $vbs = Join-Path $Root 'remote-guard-instant-launcher.vbs'

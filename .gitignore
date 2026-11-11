@@ -2,6 +2,7 @@
 push-channels.json
 instant.pid
 instant-state.json
+instant-state.json.tmp
 state.json
 *.log
 *.log.1

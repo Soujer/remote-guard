@@ -3,16 +3,7 @@
 #
 # 目的：主任务每分钟采样一轮，最坏延迟 ~70 秒；本进程把"会话刚建立"
 #       的信号做到几秒内推送。
-# 信号（与主任务同源，均为已实测的真实会话特征）：
-#   UU远程：GameViewerServer 存在非 80/443 的高端口直连，
-#           或 config\server\*.ini 在 15 秒内刚生成/刷新（会话开始标志）
-#   ToDesk：session*.xlog 在 15 秒内刚生成，且 ToDesk 进程已建立远程连接
-# 行为：触发 → 立即推送 Bark 告警，进入保持态（最短 3 分钟）；
-#       直连消失 + IO 连续 3 次(每 10 秒一测) <1MB/分钟 + ini 不新鲜
-#       → 推送"已解除"，回到待命。
-# 单实例：pid 文件防重入；由 remote-guard.ps1 每分钟看护拉起。
-# 事件日志写同一个 remote-guard.log（前缀 [即时]）。
-# ============================================================
+# 会话建立需连续两轮连接与流量佐证；解除需连续 3 分钟无会话证据。
 
 $ErrorActionPreference = 'Continue'
 # 安装根目录：默认脚本所在目录（部署时可放任意路径）
@@ -25,25 +16,7 @@ $InstState = Join-Path $Root 'instant-state.json'
 # （推送通道统一走 push-channels.json 配置，见 Send-Push）
 
 $LoopSec        = 2      # 轮询间隔（秒）
-$IniFreshSec    = 15     # UU 会话 ini 新鲜窗口
-$TdFreshSec     = 15     # ToDesk 会话 xlog 新鲜窗口
-$LatchMin       = 0.5    # 触发后最短保持受控时长（分钟）：直连消失是可靠的断开信号（静态画面直连仍在），30 秒足够防抖
-$QuietChecksNeed = 1     # 静默 IO 检查次数（每次间隔 10 秒）=> 判定解除：直连消失后 10~30 秒内解除
-$IoActiveBytesPerMin = 1MB
-$PeerPortExclude = @(80,443)
-$PushMinGapSec  = 10     # 两次告警的最小间隔（防抖；解除推送不重置此计时器，解除后的重连视为新会话必须推送）
-$ChannelsFile   = Join-Path $Root 'push-channels.json'
-# UU/ToDesk 会话文件路径自动探测（从运行中进程的安装目录推导）
-$UuSessionGlob = $null
-try {
-    $gvp = Get-Process -Name 'GameViewerServer' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($gvp -and $gvp.Path) { $UuSessionGlob = Join-Path (Split-Path (Split-Path (Split-Path $gvp.Path))) 'config\server\*.ini' }
-} catch { }
-$TdSessionGlob = $null
-try {
-    $tdp = Get-Process -Name 'ToDesk' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($tdp -and $tdp.Path) { $TdSessionGlob = Join-Path (Split-Path $tdp.Path) 'Logs\session*.xlog' }
-} catch { }
+$ChannelsFile = Join-Path $Root 'push-channels.json'
 
 function Get-PushChannels {
     try {
@@ -104,212 +77,176 @@ function Invoke-Bark([string]$Title, [string]$Body) {
     return Send-Push $Title $Body
 }
 
+# 同一进程、连续采样确认；已确认的端点不要求静态画面持续产生流量。
+function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now) {
+    if (-not $Previous) { $Previous = @{ active = $false; samples = @{}; quietSince = $null; notified = $false } }
+    $next = @{ active = $false; samples = @{}; quietSince = $Previous.quietSince; notified = $Previous.notified; pendingRecovery = $Previous.pendingRecovery; lastPushAttempt = $Previous.lastPushAttempt }
+    $evidence = $false
+    foreach ($sample in $Samples) {
+        $key = [string]$sample.Id
+        $prev = $Previous.samples[$key]
+        $seconds = 0
+        if ($prev) { $seconds = ($Now - $prev.time).TotalSeconds }
+        $valid = ($prev -and $sample.Started -and $prev.started -eq $sample.Started -and $seconds -gt 0 -and $seconds -le 10 -and $null -ne $sample.Io -and $null -ne $prev.io -and $sample.Io -ge $prev.io)
+        $delta = 0
+        if ($valid) { $delta = $sample.Io - $prev.io }
+        $overlap = @()
+        if ($prev -and $prev.confirmedPeers -and $prev.started -eq $sample.Started) {
+            $overlap = @($sample.PeerKeys | Where-Object { $prev.confirmedPeers -contains $_ })
+        }
+        $streak = 0
+        # 新会话至少连续两次有有效流量，不能累计十几秒的后台文件 IO。
+        if ($valid -and $sample.HasNet -and ($sample.PeerKeys.Count -gt 0 -or $sample.FreshSession) -and $delta -ge 512KB) {
+            $streak = 1 + [int]$prev.streak
+        }
+        $confirmedPeers = @()
+        if ($Previous.active -and $prev -and $prev.started -eq $sample.Started) { $confirmedPeers = @($prev.confirmedPeers) }
+        if ($streak -ge 2) { $confirmedPeers = @($sample.PeerKeys); $evidence = $true }
+        if ($Previous.active -and $overlap.Count -gt 0) { $evidence = $true }
+        # 已确认的中继会话仍需当前会话文件和 IO 佐证，443 心跳不能单独续期。
+        if ($Previous.active -and $valid -and $sample.HasNet -and $sample.FreshSession -and ($delta / $seconds * 60) -ge 1MB) { $evidence = $true }
+        $next.samples[$key] = @{ started = $sample.Started; time = $Now; io = $sample.Io; streak = $streak; confirmedPeers = $confirmedPeers }
+    }
+    if ($evidence) {
+        $next.active = $true
+        $next.quietSince = $null
+    } elseif ($Previous.active) {
+        if (-not $next.quietSince) { $next.quietSince = $Now }
+        $next.active = (($Now - $next.quietSince).TotalSeconds -lt 180)
+    }
+    if ($Previous.active -and -not $next.active -and $Previous.notified) { $next.pendingRecovery = $true }
+    if (-not $next.active) { $next.notified = $false }
+    else { $next.pendingRecovery = $false }
+    return $next
+}
+
+function Restore-InstantTracking($Saved, [datetime]$Now) {
+    $restored = @{}
+    if (-not $Saved -or $Saved.schema -ne 2 -or -not $Saved.updated) { return $restored }
+    $age = ($Now.ToUniversalTime() - ([datetime]$Saved.updated).ToUniversalTime()).TotalSeconds
+    if ($age -lt 0 -or $age -gt 180) { return $restored }
+    foreach ($entry in $Saved.tracking.PSObject.Properties) {
+        $value = $entry.Value
+        $samples = @{}
+        foreach ($sp in $value.samples.PSObject.Properties) {
+            $v = $sp.Value
+            $samples[$sp.Name] = @{ started = $v.started; time = ([datetime]$v.time).ToLocalTime(); io = $v.io; streak = $v.streak; confirmedPeers = @($v.confirmedPeers) }
+        }
+        $restored[$entry.Name] = @{ active = [bool]$value.active; notified = [bool]$value.notified; samples = $samples; quietSince = $(if ($value.quietSince) { ([datetime]$value.quietSince).ToLocalTime() } else { $null }); pendingRecovery = [bool]$value.pendingRecovery; lastPushAttempt = $(if ($value.lastPushAttempt) { ([datetime]$value.lastPushAttempt).ToLocalTime() } else { $null }) }
+    }
+    return $restored
+}
+
 function Test-RemoteAddress([string]$Addr) {
-    if (-not $Addr) { return $false }
-    if ($Addr -eq '127.0.0.1' -or $Addr -eq '::1' -or $Addr -eq '0.0.0.0' -or $Addr -eq '::') { return $false }
-    if ($Addr -like '127.*') { return $false }
-    if ($Addr -like 'fe80::*') { return $false }
-    return $true
+    $ip = $null
+    if (-not [System.Net.IPAddress]::TryParse($Addr, [ref]$ip)) { return $false }
+    if ($ip.IsIPv4MappedToIPv6) { $ip = $ip.MapToIPv4() }
+    return -not ([System.Net.IPAddress]::IsLoopback($ip) -or $ip.Equals([System.Net.IPAddress]::Any) -or $ip.Equals([System.Net.IPAddress]::IPv6Any))
 }
 
-function Save-InstantState([hashtable]$St) {
-    try {
-        [ordered]@{
-            lastAlert    = $St.lastAlert
-            lastTool     = $St.lastTool
-            lastRecovery = $St.lastRecovery
-        } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $InstState -Encoding UTF8
-    } catch { }
-}
-
-# ---------- 单实例守卫 ----------
+# 命名互斥量防并发启动；PID 文件仅供看护，避免误把复用 PID 当作守护进程。
+$mutex = New-Object Threading.Mutex($false, 'Local\RemoteGuardInstant')
+if (-not $mutex.WaitOne(0)) { exit 0 }
 try {
-    $already = $false
-    if (Test-Path -LiteralPath $PidFile) {
-        $oldPid = Get-Content -LiteralPath $PidFile -ErrorAction SilentlyContinue
-        if ($oldPid -and (Get-Process -Id ([int]$oldPid) -ErrorAction SilentlyContinue)) { $already = $true }
-    }
-    if ($already) { exit 0 }
-    $PID > $PidFile
-} catch { }
-
-Write-Log ('即时通道待命 (PID ' + $PID + '，轮询 ' + $LoopSec + 's)')
-
-$lastAlertTime = $null
-$ist = @{ lastAlert = $null; lastTool = $null; lastRecovery = $null }
-if (Test-Path -LiteralPath $InstState) {
+    $PID | Set-Content -LiteralPath $PidFile
+    Write-Log ('即时通道待命 (PID ' + $PID + '，连续流量确认，解除静默期 180s)')
+    $tools = @(
+        @{ name = 'UU远程'; procs = @('GameViewerServer') },
+        @{ name = 'ToDesk'; procs = @('ToDesk','ToDesk_Session') }
+    )
+    $states = @{}
+    $ist = @{ schema = 2; updated = $null; activeTools = @(); notifiedTools = @(); lastAlert = $null; lastTool = $null; lastRecovery = $null; tracking = @{} }
     try {
-        $prev = Get-Content -LiteralPath $InstState -Raw -Encoding UTF8 | ConvertFrom-Json
-        $ist.lastAlert = $prev.lastAlert; $ist.lastTool = $prev.lastTool; $ist.lastRecovery = $prev.lastRecovery
+        $saved = Get-Content -LiteralPath $InstState -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        $states = Restore-InstantTracking $saved (Get-Date)
+        if ($states.Count -gt 0) {
+            $ist.lastAlert = $saved.lastAlert; $ist.lastTool = $saved.lastTool; $ist.lastRecovery = $saved.lastRecovery
+        }
     } catch { }
-}
-# 待命态基线（跨轮保持）：ini mtime 跳变检测 + GameViewerServer IO 速率计算
-$lastIniMtimeSeen = $null
-$ioSnapPrev = $null
-$ioSnapPrevTime = $null
-$pollCount = 0
-# 流量确认状态：区分握手(无流量,几秒即逝)与真会话(秒级 MB 传输)
-$PeerFlowBytes = 512KB        # 3 秒观察窗口内最小传输量
-$PeerPendingTimeoutSec = 12   # 直连出现超过此秒数仍无流量 → 判定握手, 放弃
-$peerPending = $null          # @{ io0 = IO快照; seen = 首见时间; eps = 端点文本 }
-
-while ($true) {
-    try {
-        Start-Sleep -Seconds $LoopSec
-        $now = Get-Date
-
-        # ---------- 待命：检测触发信号 ----------
-        $trigger = $null
-        $detail  = ''
-
-        # UU：GameViewerServer 高端口直连 + 流量确认
-        # 区分"握手"与"真会话"的本质信号：流量。
-        # - 手机 UU App 打开的设备发现/信令握手：直连出现但传输量趋近于零，几秒后断开
-        # - 真被控会话：直连建立后立刻串流，秒级即有 MB 级传输
-        # 策略：直连出现 → 快照进程 IO → 下一轮(2s)复测 → 传输 ≥512KB 判真会话 → 立即告警
-        # 实时性：总延迟 = 轮询 2s + 流量窗口 2~3s ≈ 5 秒
-        $uuDirectCount = 0
-        $uuProc = Get-Process -Name 'GameViewerServer' -ErrorAction SilentlyContinue | Select-Object -First 1
-        $uuIoNow = $null
-        if ($uuProc) {
-            $c = @(Get-NetTCPConnection -State Established -OwningProcess $uuProc.Id -ErrorAction SilentlyContinue | Where-Object { $PeerPortExclude -notcontains $_.RemotePort -and (Test-RemoteAddress $_.RemoteAddress) })
-            $uuDirectCount = $c.Count
-            try {
-                $pf = Get-CimInstance Win32_PerfRawData_PerfProc_Process -Filter "IDProcess=$($uuProc.Id)" -ErrorAction Stop | Select-Object -First 1
-                if ($pf) { $uuIoNow = [double]$pf.IODataBytesPersec }
-            } catch { }
-        }
-
-        if ($uuDirectCount -gt 0) {
-            if ($null -eq $peerPending) {
-                $peerPending = @{ io0 = $(if ($null -ne $uuIoNow) { $uuIoNow } else { 0 }); seen = $now; eps = (@($c | ForEach-Object { $_.RemoteAddress + ':' + $_.RemotePort }) -join ', ') }
-            } else {
-                $flow = 0
-                if ($null -ne $uuIoNow -and $null -ne $peerPending.io0) {
-                    $flow = $uuIoNow - [double]$peerPending.io0
-                    if ($flow -lt 0) { $flow = 0 }
-                }
-                $ageSec = ($now - $peerPending.seen).TotalSeconds
-                if ($flow -ge $PeerFlowBytes) {
-                    $trigger = 'UU远程'
-                    $detail  = '被控直连会话 (3s 传输 ' + [math]::Round($flow/1KB) + 'KB: ' + $peerPending.eps + ')'
-                    $peerPending = $null
-                } elseif ($ageSec -ge $PeerPendingTimeoutSec) {
-                    $peerPending = $null   # 握手: 超时无流量, 静默放弃
-                }
+    while ($true) {
+        try {
+            $now = Get-Date
+            $connections = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Established' })
+            $io = @{}
+            foreach ($pf in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction Stop)) {
+                $io[[int]$pf.IDProcess] = [double]$pf.IODataBytesPersec
             }
-        } else {
-            $peerPending = $null   # 直连消失（握手的典型结局）
-        }
-
-        # UU：会话 ini 刚生成（纯中继会话兜底）。
-        # 红线：会话【开始】和【结束】都会刷新 ini，文件新鲜 ≠ 会话进行中，
-        #       必须叠加高端口直连佐证（流量确认观察中）；断开瞬间直连已消失，不会再误报。
-        if (-not $trigger -and $UuSessionGlob -and $peerPending -and $uuDirectCount -gt 0) {
-            $ini = Get-ChildItem -Path $UuSessionGlob -File -ErrorAction SilentlyContinue | Where-Object { ($now - $_.LastWriteTime).TotalSeconds -le $IniFreshSec } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($ini) {
-                # ini 新鲜 + 直连在流量确认观察中 → 下轮流量达标会自动触发, 此处不提前告警
-            }
-        }
-
-        # ToDesk：会话 xlog 刚生成 + 进程已建立远程连接
-        if (-not $trigger -and $TdSessionGlob) {
-            $td = Get-ChildItem -Path $TdSessionGlob -File -ErrorAction SilentlyContinue | Where-Object { ($now - $_.LastWriteTime).TotalSeconds -le $TdFreshSec } | Sort-Object LastWriteTime -Descending | Select-Object -First 1
-            if ($td) {
-                $tdProcs = @(Get-Process -Name 'ToDesk','ToDesk_Session' -ErrorAction SilentlyContinue)
-                $tdNet = $false
-                foreach ($tp in $tdProcs) {
-                    if (@(Get-NetTCPConnection -State Established -OwningProcess $tp.Id -ErrorAction SilentlyContinue | Where-Object { Test-RemoteAddress $_.RemoteAddress }).Count -gt 0) { $tdNet = $true; break }
-                }
-                if ($tdNet) { $trigger = 'ToDesk'; $detail = '会话文件刚生成 (' + $td.Name + ')' }
-            }
-        }
-
-        if (-not $trigger) { continue }
-
-        # 防抖：距上次推送太近则只进保持态，不重复推
-        $canPush = $true
-        if ($lastAlertTime -and (($now - $lastAlertTime).TotalSeconds -lt $PushMinGapSec)) { $canPush = $false }
-
-        if ($canPush) {
-            $body = '检测到本机可能正被远程控制（即时通道，会话建立后 ' + $LoopSec + '~' + ($LoopSec * 3) + ' 秒内捕获）：' + "`r`n" + ('· {0}: {1}' -f $trigger, $detail) + "`r`n主机: $env:COMPUTERNAME  用户: $env:USERNAME" + "`r`n时间: " + $now.ToString('yyyy-MM-dd HH:mm:ss')
-            if (Invoke-Bark '远程控制告警' $body) {
-                Write-Log ('即时告警已推送: · {0}: {1}' -f $trigger, $detail)
-            } else {
-                Write-Log ('即时告警推送失败（保持态仍生效）: · {0}: {1}' -f $trigger, $detail)
-            }
-            $lastAlertTime = $now
-            $ist.lastAlert = $now.ToString('o'); $ist.lastTool = $trigger
-            Save-InstantState $ist
-        }
-
-        # ---------- 保持态：直连/IO 任一在场即维持，全部消失后解除 ----------
-        $quietChecks = 0
-        $lastIoVals = $null
-        $lastIoTime = $now
-        $holdStart = $now
-        while ($true) {
-            Start-Sleep -Seconds $LoopSec
-            $t = Get-Date
-
-            # 直连仍在 → 活跃
-            $stillActive = $false
-            $uuP = Get-Process -Name 'GameViewerServer' -ErrorAction SilentlyContinue | Select-Object -First 1
-            if ($uuP) {
-                if (@(Get-NetTCPConnection -State Established -OwningProcess $uuP.Id -ErrorAction SilentlyContinue | Where-Object { $PeerPortExclude -notcontains $_.RemotePort -and (Test-RemoteAddress $_.RemoteAddress) }).Count -gt 0) { $stillActive = $true }
-            }
-            if (-not $stillActive) {
-                $tdProcs2 = @(Get-Process -Name 'ToDesk','ToDesk_Session' -ErrorAction SilentlyContinue)
-                foreach ($tp in $tdProcs2) {
-                    if (@(Get-NetTCPConnection -State Established -OwningProcess $tp.Id -ErrorAction SilentlyContinue | Where-Object { Test-RemoteAddress $_.RemoteAddress }).Count -gt 0) { $stillActive = $true; break }
-                }
-            }
-            if ($stillActive) { $quietChecks = 0; $lastIoVals = $null; $lastIoTime = $t; continue }
-
-            # 每 10 秒测一次进程 IO（串流流量 >=1MB/分钟 视为活跃）
-            if (($t - $lastIoTime).TotalSeconds -ge 10) {
-                $curIo = @{}
-                try {
-                    foreach ($pf in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction SilentlyContinue)) {
-                        if ($pf.IDProcess -gt 0 -and ($pf.Name -match '(?i)^gamerviewerserver$|^todesk$')) { $curIo[[int]$pf.IDProcess] = [double]$pf.IODataBytesPersec }
-                    }
-                } catch { }
-                $ioRate = 0.0
-                if ($lastIoVals) {
-                    foreach ($k in $curIo.Keys) {
-                        if ($lastIoVals.ContainsKey($k)) {
-                            $d = $curIo[$k] - [double]$lastIoVals[$k]
-                            if ($d -gt 0) { $ioRate += $d / ($t - $lastIoTime).TotalSeconds * 60 }
+            if ($io.Count -eq 0) { throw '性能采样为空' }
+            foreach ($tool in $tools) {
+                $samples = @()
+                foreach ($p in @(Get-Process -Name $tool.procs -ErrorAction SilentlyContinue)) {
+                    $started = $null
+                    $sessionGlob = $null
+                    try {
+                        $started = $p.StartTime.ToUniversalTime().ToString('o')
+                        if ($p.Path -and $tool.name -eq 'UU远程') {
+                            $sessionGlob = Join-Path (Split-Path (Split-Path (Split-Path $p.Path))) 'config\server\*.ini'
+                        } elseif ($p.Path) {
+                            $sessionGlob = Join-Path (Split-Path $p.Path) 'Logs\session*.xlog'
                         }
+                    } catch { }
+                    $fresh = $false
+                    if ($sessionGlob) {
+                        $files = @(Get-ChildItem -Path $sessionGlob -File -ErrorAction SilentlyContinue | Where-Object {
+                            $age = ($now - $_.LastWriteTime).TotalSeconds
+                            $age -ge 0 -and $age -le 15
+                        })
+                        $fresh = ($files.Count -gt 0)
                     }
+                    $conns = @($connections | Where-Object { $_.OwningProcess -eq $p.Id -and (Test-RemoteAddress $_.RemoteAddress) })
+                    $peers = @($conns | Where-Object { $_.RemotePort -notin @(80,443) } | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort })
+                    $samples += @{ Id = $p.Id; Started = $started; Io = $(if ($io.ContainsKey([int]$p.Id)) { $io[[int]$p.Id] } else { $null }); PeerKeys = $peers; HasNet = ($conns.Count -gt 0); FreshSession = $fresh }
                 }
-                $lastIoVals = $curIo
-                $lastIoTime = $t
-                $script:ioRateLast = $ioRate
-                if ($ioRate -ge $IoActiveBytesPerMin) { $quietChecks = 0 } else { $quietChecks++ }
-            }
-
-            # 会话文件兜底：ini 新鲜且串流 IO 仍在（≥1MB/分钟）→ 会话还在（纯中继场景）。
-            # 不能只看 ini 新鲜：断开时 UU 也会刷新 ini，会把"已解除"错误地续命。
-            if ($UuSessionGlob -and $lastIoVals -and $script:ioRateLast -ge $IoActiveBytesPerMin) {
-                $ini2 = Get-ChildItem -Path $UuSessionGlob -File -ErrorAction SilentlyContinue | Where-Object { ($t - $_.LastWriteTime).TotalSeconds -le $IniFreshSec }
-                if ($ini2) { $quietChecks = 0; continue }
-            }
-
-            $age = ($t - $holdStart).TotalMinutes
-            if ($age -ge $LatchMin -and $quietChecks -ge $QuietChecksNeed) {
-                $recBody = '本机远程控制迹象已消失（即时通道）。主机: ' + $env:COMPUTERNAME + '  时间: ' + $t.ToString('yyyy-MM-dd HH:mm:ss')
-                if (Invoke-Bark '远程控制已解除' $recBody) {
-                    Write-Log '即时通道已恢复: 已推送'
-                } else {
-                    Write-Log '即时通道已恢复: 推送失败'
+                $previous = $states[$tool.name]
+                $next = Update-InstantEvidence $previous $samples $now
+                $canPush = (-not $next.lastPushAttempt -or ($now - $next.lastPushAttempt).TotalSeconds -ge 10)
+                if ($next.active -and -not $next.notified -and $canPush) {
+                    # 从分钟任务接管已通知的会话时，不再重复发送进入通知。
+                    try {
+                        $main = Get-Content -LiteralPath (Join-Path $Root 'state.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+                        $mainAge = ($now - [datetime]$main.lastRun).TotalSeconds
+                        if ($main.controlled -and $main.tools -contains $tool.name -and $mainAge -ge 0 -and $mainAge -le 90 -and $main.lastNotify -and ($now - [datetime]$main.lastNotify).TotalMinutes -lt 30) {
+                            $next.notified = $true
+                            $ist.lastAlert = $main.lastNotify
+                        }
+                    } catch { }
                 }
-                $ist.lastRecovery = $t.ToString('o')
-                Save-InstantState $ist
-                break
+                if ($next.active -and -not $next.notified -and $canPush) {
+                    $next.lastPushAttempt = $now
+                    $body = '同一进程连续流量与连接确认: ' + $tool.name + ' 主机: ' + $env:COMPUTERNAME + ' 时间: ' + $now.ToString('yyyy-MM-dd HH:mm:ss')
+                    if (Send-Push '远程控制告警' $body) {
+                        $next.notified = $true
+                        $ist.lastAlert = $now.ToString('o')
+                        $ist.lastTool = $tool.name
+                        Write-Log ('即时告警已推送: ' + $tool.name)
+                    }
+                } elseif ($next.pendingRecovery -and $canPush) {
+                    $next.lastPushAttempt = $now
+                    if (Send-Push '远程控制已解除' ('会话信号连续 3 分钟消失: ' + $tool.name + ' 主机: ' + $env:COMPUTERNAME)) {
+                        $next.pendingRecovery = $false
+                        Write-Log ('即时通道已恢复: ' + $tool.name)
+                    } else { Write-Log ('解除推送失败: ' + $tool.name) }
+                    $ist.lastRecovery = $now.ToString('o')
+                }
+                $states[$tool.name] = $next
             }
+            $ist.updated = $now.ToString('o')
+            $ist.activeTools = @($tools | Where-Object { $states[$_.name].active } | ForEach-Object { $_.name })
+            $ist.notifiedTools = @($tools | Where-Object { $states[$_.name].active -and $states[$_.name].notified } | ForEach-Object { $_.name })
+            $ist.tracking = $states
+            # 临时文件 + 原子替换，主任务不会读到半截 JSON。
+            $tmp = $InstState + '.tmp'
+            $ist | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
+            if (Test-Path -LiteralPath $InstState) { [IO.File]::Replace($tmp, $InstState, $null) }
+            else { [IO.File]::Move($tmp, $InstState) }
+        } catch {
+            # 采集失败不等同断开，不更新状态，等下一轮恢复采集。
+            Write-Log ('即时采样失败: ' + $_.Exception.Message)
         }
-    } catch {
-        Start-Sleep -Seconds 5
+        Start-Sleep -Seconds $LoopSec
     }
+} finally {
+    Remove-Item -LiteralPath $PidFile -ErrorAction SilentlyContinue
+    $mutex.ReleaseMutex()
+    $mutex.Dispose()
 }
