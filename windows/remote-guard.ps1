@@ -584,6 +584,22 @@ $controlled = ($findings.Count -gt 0)
 $detailLines = @($findings | ForEach-Object { '· {0}: {1}' -f $_.Tool, $_.Detail })
 $instantOwnsCurrent = ($instantFresh -and $controlled -and @($findings | Where-Object { $instant.notifiedTools -notcontains $_.Tool }).Count -eq 0)
 
+# ---------- UU 虚拟显示器：纯中继/静态画面下"会话在场"的硬证据 ----------
+# 虚拟显示器只在被控会话中激活（直连休眠、ini 停更、IO 归零时它仍在），
+# 激活即维持受控状态；解除必须等它消失。跳变通知由 RemindMinutes 防抖兜底。
+if ($uuVDisplayActive) {
+    $uuVdPrev = $false
+    if ($state -and $state.uuVDisplay) { $uuVdPrev = [bool]$state.uuVDisplay }
+    if (-not ($instantFresh -and $instant.activeTools -contains 'UU远程')) {
+        # 即时通道已确认 UU 会话时不重复加 finding（避免双通道重复推送）
+        $vdFinding = [pscustomobject]@{ Tool = 'UU远程'; Pid = '-'; Detail = '虚拟显示器激活（被控会话在场）'; Real = $true }
+        [void]$findings.Add($vdFinding)
+        if (-not $controlled) { $detailLines = @('· UU远程: 虚拟显示器激活（被控会话在场）') }
+        $controlled = $true
+        $instantOwnsCurrent = $false
+    }
+}
+
 # ---------- 受控粘滞：防"静态画面/直连休眠"误恢复 ----------
 # 真会话确认后信号可能暂时归零：UU 静态画面时 GPU 编码器不产出（串流 IO 掉到空闲基线），
 # P2P 直连可能被断开省资源——但会话并没有结束！

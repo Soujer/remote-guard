@@ -75,6 +75,16 @@ $s = Update-InstantEvidence $null @((Sample 0 'process-A' @() $true)) $t
 $s = Update-InstantEvidence $s @((Sample 1MB 'process-A' @() $true)) $t.AddSeconds(2)
 $s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @() $true)) $t.AddSeconds(4)
 Assert $s.active 'Relay sessions with fresh session files and sustained IO must remain detectable'
+$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(6) $true
+Assert ($s.active -and -not $s.quietSince) 'Virtual display must keep a relay session alive with zero traffic'
+for ($i = 1; $i -le 120; $i++) { $s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(6 + $i * 2) $true }
+Assert ($s.active -and -not $s.quietSince) 'Virtual display must hold a static relay session indefinitely'
+$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(300) $false
+Assert $s.active 'First quiet sample after losing the virtual display must start the release timer'
+$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(360) $false
+Assert $s.active 'Quiet under three minutes must hold the session'
+$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(600) $false
+Assert (-not $s.active) 'Losing the virtual display must allow normal release'
 $saved = @{ schema = 2; updated = $t.AddSeconds(4); tracking = @{ 'UU远程' = $confirmed } } | ConvertTo-Json -Depth 8 | ConvertFrom-Json
 $restored = Restore-InstantTracking $saved $t.AddSeconds(6)
 $s = Update-InstantEvidence $restored['UU远程'] @((Sample 2MB)) $t.AddSeconds(8)
@@ -137,6 +147,7 @@ try {
     function Get-WinEvent { param($FilterHashtable, $MaxEvents, $ErrorAction) throw 'No fixture events' }
     function qwinsta { return @('console user 1 Active') }
     function Start-Process { throw 'Unexpected process launch in regression test' }
+    $global:vdisplayFixture = $false
     $statePath = Join-Path $temp 'state.json'
     $instantPath = Join-Path $temp 'instant-state.json'
     $baseline = @{ lastRun = (Get-Date).AddMinutes(-1).ToString('o'); controlled = $false; rdpDenyPrev = 1; svcStates = @{ ToDesk = @{ state = 'Stopped' } }; seenEvents = @{} }
@@ -160,6 +171,35 @@ try {
     & (Join-Path $temp 'remote-guard.ps1')
     $result = Get-Content $statePath -Raw | ConvertFrom-Json
     Assert (-not $result.controlled) 'Main task must not add another three-minute hold after instant recovery'
+    # UU 虚拟显示器激活：纯中继/静态画面下会话在场的硬证据，必须维持受控且不清除静默计时陷阱
+    # 注意：mock 通过 $global: 与被 & 调用的子脚本连通（$script: 作用域不跨脚本）
+    @{ schema = 2; updated = (Get-Date).ToString('o'); activeTools = @(); notifiedTools = @() } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
+    $global:vdisplayFixture = $false
+    $vdAdapter = [pscustomobject]@{ Name = 'GameViewer Virtual Display Adapter'; Availability = 3; CurrentHorizontalResolution = 1920 }
+    function Get-CimInstance {
+        param($ClassName, $Filter, $ErrorAction)
+        if ($ClassName -eq 'Win32_PerfRawData_PerfProc_Process') { return [pscustomobject]@{ IDProcess = 4; IODataBytesPersec = 0 } }
+        if ($ClassName -eq 'Win32_VideoController' -and $global:vdisplayFixture) { return @($vdAdapter) }
+        return @()
+    }
+    $global:vdisplayFixture = $true
+    & (Join-Path $temp 'remote-guard.ps1')
+    $result = Get-Content $statePath -Raw | ConvertFrom-Json
+    Assert ($result.controlled) 'Virtual display activity must hold the controlled state without instant ownership'
+    $baseline2 = @{ lastRun = (Get-Date).AddMinutes(-1).ToString('o'); controlled = $true; since = (Get-Date).AddMinutes(-20).ToString('o'); quietSince = (Get-Date).AddMinutes(-4).ToString('o'); rdpDenyPrev = 1; svcStates = @{ ToDesk = @{ state = 'Stopped' } }; seenEvents = @{}; uuVDisplay = $true }
+    $baseline2 | ConvertTo-Json -Depth 5 | Set-Content $statePath -Encoding UTF8
+    & (Join-Path $temp 'remote-guard.ps1')
+    $result = Get-Content $statePath -Raw | ConvertFrom-Json
+    Assert ($result.controlled -and -not $result.quietSince) 'Virtual display must reset the quiet timer while holding control'
+    $global:vdisplayFixture = $false
+    & (Join-Path $temp 'remote-guard.ps1')
+    $result = Get-Content $statePath -Raw | ConvertFrom-Json
+    Assert ($result.controlled -and $result.quietSince) 'Losing the virtual display must start the quiet timer, not release instantly'
+    $baseline3 = @{ lastRun = (Get-Date).AddMinutes(-1).ToString('o'); controlled = $true; since = (Get-Date).AddMinutes(-20).ToString('o'); quietSince = (Get-Date).AddMinutes(-4).ToString('o'); rdpDenyPrev = 1; svcStates = @{ ToDesk = @{ state = 'Stopped' } }; seenEvents = @{}; uuVDisplay = $false }
+    $baseline3 | ConvertTo-Json -Depth 5 | Set-Content $statePath -Encoding UTF8
+    & (Join-Path $temp 'remote-guard.ps1')
+    $result = Get-Content $statePath -Raw | ConvertFrom-Json
+    Assert (-not $result.controlled) 'Controlled state must release after the virtual display disappears and the quiet period elapses'
     $before = Get-Content $statePath -Raw
     function Get-NetTCPConnection { param($State, $ErrorAction) throw 'simulated network failure' }
     & (Join-Path $temp 'remote-guard.ps1')
@@ -174,3 +214,4 @@ try {
     Remove-Item -LiteralPath $temp
 }
 'Passed {0} regression checks.' -f $script:checks
+

@@ -78,10 +78,12 @@ function Invoke-Bark([string]$Title, [string]$Body) {
 }
 
 # 同一进程、连续采样确认；已确认的端点不要求静态画面持续产生流量。
-function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now) {
+function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now, [bool]$VDisplayActive) {
     if (-not $Previous) { $Previous = @{ active = $false; samples = @{}; quietSince = $null; notified = $false } }
     $next = @{ active = $false; samples = @{}; quietSince = $Previous.quietSince; notified = $Previous.notified; pendingRecovery = $Previous.pendingRecovery; lastPushAttempt = $Previous.lastPushAttempt }
     $evidence = $false
+    # UU 虚拟显示器激活 = 被控会话在场的硬证据（纯中继/静态画面下唯一可靠信号）
+    if ($VDisplayActive) { $evidence = $true }
     foreach ($sample in $Samples) {
         $key = [string]$sample.Id
         $prev = $Previous.samples[$key]
@@ -172,6 +174,15 @@ try {
                 $io[[int]$pf.IDProcess] = [double]$pf.IODataBytesPersec
             }
             if ($io.Count -eq 0) { throw '性能采样为空' }
+            # UU 虚拟显示器状态（低频采样，仅每 30 秒刷新一次缓存）
+            if (-not $script:vdispChecked -or (($now - $script:vdispChecked).TotalSeconds -ge 30)) {
+                $script:vdispActive = $false
+                try {
+                    $uuVc = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'GameViewer Virtual Display Adapter' })
+                    if ($uuVc.Count -gt 0 -and $uuVc[0].Availability -eq 3 -and $uuVc[0].CurrentHorizontalResolution -gt 0) { $script:vdispActive = $true }
+                } catch { }
+                $script:vdispChecked = $now
+            }
             foreach ($tool in $tools) {
                 $samples = @()
                 foreach ($p in @(Get-Process -Name $tool.procs -ErrorAction SilentlyContinue)) {
@@ -198,7 +209,9 @@ try {
                     $samples += @{ Id = $p.Id; Started = $started; Io = $(if ($io.ContainsKey([int]$p.Id)) { $io[[int]$p.Id] } else { $null }); PeerKeys = $peers; HasNet = ($conns.Count -gt 0); FreshSession = $fresh }
                 }
                 $previous = $states[$tool.name]
-                $next = Update-InstantEvidence $previous $samples $now
+                # UU 虚拟显示器激活只对 UU 会话构成在场证据
+                $vdActive = (($tool.name -eq 'UU远程') -and [bool]$script:vdispActive)
+                $next = Update-InstantEvidence $previous $samples $now $vdActive
                 $canPush = (-not $next.lastPushAttempt -or ($now - $next.lastPushAttempt).TotalSeconds -ge 10)
                 if ($next.active -and -not $next.notified -and $canPush) {
                     # 从分钟任务接管已通知的会话时，不再重复发送进入通知。
@@ -235,10 +248,10 @@ try {
             $ist.notifiedTools = @($tools | Where-Object { $states[$_.name].active -and $states[$_.name].notified } | ForEach-Object { $_.name })
             $ist.tracking = $states
             # 临时文件 + 原子替换，主任务不会读到半截 JSON。
+            # （.NET Framework 的 File.Replace 对空 backup 路径会抛异常，改用 Move -Force 覆盖）
             $tmp = $InstState + '.tmp'
             $ist | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
-            if (Test-Path -LiteralPath $InstState) { [IO.File]::Replace($tmp, $InstState, $null) }
-            else { [IO.File]::Move($tmp, $InstState) }
+            Move-Item -LiteralPath $tmp -Destination $InstState -Force
         } catch {
             # 采集失败不等同断开，不更新状态，等下一轮恢复采集。
             Write-Log ('即时采样失败: ' + $_.Exception.Message)
