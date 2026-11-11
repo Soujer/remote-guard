@@ -641,17 +641,21 @@ $detailLines = @($findings | ForEach-Object { '· {0}: {1}' -f $_.Tool, $_.Detai
 # P2P 直连可能被断开省资源——但会话并没有结束！
 # 规则：曾受控时本轮无 finding 不立即解除，需"无任何会话信号"连续 $ReleaseAfterQuietMin 分钟。
 $ReleaseAfterQuietMin = 3
+$stickyHeld = $false   # 本轮是否为"粘滞保持"（无 finding 但因静默期未满而保持受控）
 if (-not $controlled -and $wasControlled -and $state -and $state.since) {
     try {
         $quietSince = $null
         if ($state.quietSince) { try { $quietSince = [datetime]::Parse([string]$state.quietSince) } catch { } }
         if (-not $quietSince) {
-            $controlled = $true
+            # 第一轮静默: 记录时刻, 暂不解除
+            $controlled = $true; $stickyHeld = $true
             $detailLines = @('· 会话静默观察中（等待确认结束，最长 ' + $ReleaseAfterQuietMin + ' 分钟）')
         } elseif ((($now - $quietSince).TotalMinutes -lt $ReleaseAfterQuietMin)) {
-            $controlled = $true
+            # 静默未满 3 分钟: 保持受控
+            $controlled = $true; $stickyHeld = $true
             $detailLines = @('· 会话静默 ' + [int](($now - $quietSince).TotalMinutes) + ' 分钟（< ' + $ReleaseAfterQuietMin + ' 分钟，保持受控）')
         }
+        # 静默 >= 3 分钟: controlled 保持 false, 正常解除
     } catch { }
 }
 
@@ -743,11 +747,16 @@ if (-not $Seed) {
 # ---------- 保存状态 ----------
 $sinceValue = $null
 $stateControlled = $controlled
+$quietSinceOut = $null
 if ($Seed) {
     # 基线模式不改动受控状态，只更新已见事件
     $stateControlled = $wasControlled
     if ($wasControlled -and $state -and $state.since) { $sinceValue = $state.since }
     if ($wasControlled -and $state -and $state.quietSince) { $quietSinceOut = [string]$state.quietSince }
+} elseif ($stickyHeld) {
+    # 粘滞保持（无 finding 但静默期未满）：必须持久化静默起始时刻，否则下一轮永远当作"第一轮静默"
+    if ($wasControlled -and $state -and $state.since) { $sinceValue = $state.since } else { $sinceValue = $now.ToString('o') }
+    if ($state -and $state.quietSince) { $quietSinceOut = [string]$state.quietSince } else { $quietSinceOut = $now.ToString('o') }
 } elseif ($controlled) {
     if ($wasControlled -and $state -and $state.since) { $sinceValue = $state.since } else { $sinceValue = $now.ToString('o') }
     # 受控恢复（本轮有 finding）→ 静默计时清空（quietSinceOut 保持 null）
