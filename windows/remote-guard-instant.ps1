@@ -77,6 +77,15 @@ function Invoke-Bark([string]$Title, [string]$Body) {
     return Send-Push $Title $Body
 }
 
+function Get-GuardProcessIdentity($Process, $Metadata) {
+    # 普通权限不能读取某些高权限进程的 Process.StartTime；CIM CreationDate 可读。
+    # 优先使用同一来源，避免管理员与计划任务之间切换时身份不一致。
+    if ($Metadata -and $Metadata.CreationDate) {
+        return ([datetime]$Metadata.CreationDate).ToUniversalTime().ToString('o')
+    }
+    try { return $Process.StartTime.ToUniversalTime().ToString('o') } catch { return $null }
+}
+
 # 同一进程、连续采样确认；已确认的端点不要求静态画面持续产生流量。
 function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now, [bool]$VDisplayActive, [bool]$RequireUuEvidence = $false) {
     if (-not $Previous) { $Previous = @{ active = $false; samples = @{}; quietSince = $null; notified = $false } }
@@ -181,13 +190,17 @@ try {
                 $io[[int]$pf.IDProcess] = [double]$pf.IODataBytesPersec
             }
             if ($io.Count -eq 0) { throw '性能采样为空' }
+            $metadataById = @{}
+            foreach ($metadata in @(Get-CimInstance Win32_Process -Filter "Name='GameViewerServer.exe' OR Name='ToDesk.exe' OR Name='ToDesk_Session.exe'" -ErrorAction Stop)) {
+                $metadataById[[int]$metadata.ProcessId] = $metadata
+            }
             foreach ($tool in $tools) {
                 $samples = @()
                 foreach ($p in @(Get-Process -Name $tool.procs -ErrorAction SilentlyContinue)) {
-                    $started = $null
+                    $started = Get-GuardProcessIdentity $p $metadataById[[int]$p.Id]
+                    if (-not $started) { throw ('无法读取进程身份，保留会话状态: PID ' + $p.Id) }
                     $sessionGlob = $null
                     try {
-                        $started = $p.StartTime.ToUniversalTime().ToString('o')
                         if ($p.Path -and $tool.name -eq 'UU远程') {
                             $sessionGlob = Join-Path (Split-Path (Split-Path $p.Path)) 'config\server\*.ini'
                         } elseif ($p.Path) {

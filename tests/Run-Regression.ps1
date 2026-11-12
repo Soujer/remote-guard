@@ -15,7 +15,7 @@ $mainAst = Read-Ast (Join-Path $repo 'windows/remote-guard.ps1')
 $instantAst = Read-Ast (Join-Path $repo 'windows/remote-guard-instant.ps1')
 [void](Read-Ast (Join-Path $repo 'windows/remote-guard-setup.ps1'))
 # Load only pure functions; never launch a watcher or read push credentials.
-foreach ($fn in $instantAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Update-InstantEvidence','Restore-InstantTracking','Test-RemoteAddress') }, $true)) {
+foreach ($fn in $instantAst.FindAll({ param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -in @('Update-InstantEvidence','Restore-InstantTracking','Test-RemoteAddress','Get-GuardProcessIdentity') }, $true)) {
     . ([scriptblock]::Create($fn.Extent.Text))
 }
 foreach ($address in @('127.0.0.1','127.1.2.3','::1','::ffff:127.0.0.1','0.0.0.0','::','invalid')) {
@@ -23,6 +23,15 @@ foreach ($address in @('127.0.0.1','127.1.2.3','::1','::ffff:127.0.0.1','0.0.0.0
 }
 Assert (Test-RemoteAddress '192.168.1.20') 'LAN peers must remain detectable'
 Assert (Test-RemoteAddress 'fe80::1234') 'IPv6 LAN peers must remain detectable'
+$restricted = [pscustomobject]@{ Id = 100 }
+$restricted | Add-Member -MemberType ScriptProperty -Name StartTime -Value { throw 'Access denied to elevated process' }
+$creation = [datetime]'2026-11-11T01:18:38Z'
+$metadata = [pscustomobject]@{ ProcessId = 100; CreationDate = $creation; ExecutablePath = $null }
+$restrictedIdentity = Get-GuardProcessIdentity $restricted $metadata
+Assert ($restrictedIdentity -eq $creation.ToUniversalTime().ToString('o')) 'Limited task must obtain process identity through CIM when StartTime is denied'
+Assert ($null -eq (Get-GuardProcessIdentity $restricted $null)) 'Unreadable identity must remain unknown rather than using a fake timestamp'
+$accessible = [pscustomobject]@{ StartTime = $creation.AddMilliseconds(1) }
+Assert ((Get-GuardProcessIdentity $accessible $metadata) -eq $restrictedIdentity) 'Elevated and limited collectors must use the same CIM identity'
 
 $t = [datetime]'2026-11-11T12:00:00'
 function Sample($Io, [string]$Started = 'process-A', [array]$Peers = @('peer-A'), [bool]$Fresh = $false) {
@@ -121,6 +130,7 @@ function Main-Sample($Previous, [double]$Io, [array]$Connections, [double]$Cpu =
     $def = @{ Name = 'UU远程'; CpuRule = $false; PeerProcs = @('GameViewerServer') }
     $procs = @([pscustomobject]@{ Id = 100; Name = 'GameViewerServer'; StartTime = [datetime]$Started; CPU = $Cpu })
     $state = [pscustomobject]@{ procs = [pscustomobject]$Previous }
+    $procById = @{}
     $elapsedMin = $Elapsed; $now = $t
     $ioByPid = @{ 100 = $Io }; $estConns = $Connections; $tcpSnapshot = @($Connections) + @($Connections | ForEach-Object { [pscustomobject]@{ OwningProcess = $_.OwningProcess; State = 'Listen'; LocalPort = $_.LocalPort } })
     $newStreaks = @{}; $peerStreaksNew = @{}; $procInfo = @{}
@@ -147,6 +157,16 @@ $m = Main-Sample @{} 0 @() 0
 $m = Main-Sample $m.procs 10MB @() 500
 $m = Main-Sample $m.procs 20MB @() 1000
 Assert ($m.count -eq 0) 'Disk IO/CPU without a remote connection must not trigger a session'
+
+# Replay the actual defect: the task sees TCP connections but cannot access StartTime/Path.
+$s = $null
+for ($i = 0; $i -le 120; $i++) {
+    $sample = Bundle-Sample
+    $sample.Started = Get-GuardProcessIdentity $restricted $metadata
+    $s = Update-InstantEvidence $s @($sample) $t.AddSeconds($i * 2) $false $true
+}
+Assert ($s.active -and -not $s.quietSince) 'A limited collector must retain an established UU session beyond the old three-minute false release'
+Assert (@($s.samples['100'].confirmedPeers).Count -eq 4) 'Limited monitoring must preserve confirmed native endpoints'
 
 # Integration tests run a copy with no channel configuration. All OS collectors are mocked.
 $temp = Join-Path ([IO.Path]::GetTempPath()) ('remote-guard-regression-' + [guid]::NewGuid().ToString('N'))

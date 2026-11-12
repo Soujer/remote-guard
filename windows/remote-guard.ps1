@@ -179,6 +179,14 @@ function Invoke-Bark([string]$Title, [string]$Body) {
     return Send-Push $Title $Body
 }
 
+function Get-GuardProcessIdentity($Process, $Metadata) {
+    # 与即时通道统一使用 CIM 身份，兼容普通权限读取高权限远控进程。
+    if ($Metadata -and $Metadata.CreationDate) {
+        return ([datetime]$Metadata.CreationDate).ToUniversalTime().ToString('o')
+    }
+    try { return $Process.StartTime.ToUniversalTime().ToString('o') } catch { return $null }
+}
+
 function Test-RemoteAddress([string]$Addr) {
     $ip = $null
     if (-not [System.Net.IPAddress]::TryParse($Addr, [ref]$ip)) { return $false }
@@ -250,6 +258,16 @@ try {
 } catch {
     if ($DryRun) { throw }
     Write-Log '活动采样失败，保留上轮状态，不判定解除'
+    return
+}
+$cimProcs = @()
+$procById = @{}
+try {
+    $cimProcs = @(Get-CimInstance Win32_Process -ErrorAction Stop)
+    foreach ($cp in $cimProcs) { $procById[[string]$cp.ProcessId] = $cp }
+} catch {
+    if ($DryRun) { throw }
+    Write-Log '进程身份采样失败，保留上轮状态，不判定解除'
     return
 }
 
@@ -324,8 +342,12 @@ foreach ($def in $ToolDefs) {
             }
             foreach ($p in $procs) {
                 $key = [string]$p.Id
-                $started = $null
-                try { $started = $p.StartTime.ToUniversalTime().ToString('o') } catch { }
+                $started = Get-GuardProcessIdentity $p $procById[$key]
+                if (-not $started) {
+                    if ($DryRun) { throw ('无法读取进程身份: PID ' + $p.Id) }
+                    Write-Log ('无法读取进程身份，保留会话状态: PID ' + $p.Id)
+                    return
+                }
                 $cpu = $(if ($null -ne $p.CPU) { [double]$p.CPU } else { 0 })
                 $io = $(if ($ioByPid.ContainsKey([int]$p.Id)) { $ioByPid[[int]$p.Id] } else { $null })
                 $conns = @($estConns | Where-Object { $_.OwningProcess -eq $p.Id -and (Test-RemoteAddress $_.RemoteAddress) })
@@ -497,11 +519,7 @@ if ($state -and $state.seenEvents) {
     }
 }
 
-# 进程快照（含父进程 / 命令行）
-$cimProcs = @()
-try { $cimProcs = @(Get-CimInstance Win32_Process -ErrorAction SilentlyContinue) } catch { }
-$procById = @{}
-foreach ($cp in $cimProcs) { $procById[[string]$cp.ProcessId] = $cp }
+# 复用本轮已采集的进程快照（含父进程 / 命令行）。
 
 # 已知工具进程名（用于端口检测时排除，避免误报）
 $knownToolProcs = @()
