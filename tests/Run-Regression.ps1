@@ -76,20 +76,38 @@ $s = Update-InstantEvidence $s @((Sample 1MB 'process-A' @() $true)) $t.AddSecon
 $s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @() $true)) $t.AddSeconds(4)
 Assert $s.active 'Relay sessions with fresh session files and sustained IO must remain detectable'
 $s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(6) $true
-Assert ($s.active -and -not $s.quietSince) 'Virtual display must keep a relay session alive with zero traffic'
+Assert ($s.active -and $s.quietSince) 'A static virtual adapter cannot reset a missing-session quiet timer'
 for ($i = 1; $i -le 120; $i++) { $s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(6 + $i * 2) $true }
-Assert ($s.active -and -not $s.quietSince) 'Virtual display must hold a static relay session indefinitely'
-$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(300) $false
-Assert $s.active 'First quiet sample after losing the virtual display must start the release timer'
-$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(360) $false
-Assert $s.active 'Quiet under three minutes must hold the session'
-$s = Update-InstantEvidence $s @((Sample 2MB 'process-A' @())) $t.AddSeconds(600) $false
-Assert (-not $s.active) 'Losing the virtual display must allow normal release'
-$saved = @{ schema = 2; updated = $t.AddSeconds(4); tracking = @{ 'UU远程' = $confirmed } } | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+Assert (-not $s.active) 'A permanently enabled virtual adapter must not keep a disconnected session alive'
+$s = Update-InstantEvidence $null @((Sample 0)) $t $true $true
+Assert (-not $s.active) 'A virtual adapter cannot start a UU session'
+$s = Update-InstantEvidence $null @() $t $true $true
+Assert (-not $s.active) 'An adapter with no UU process cannot prove a session'
+function Bundle-Sample {
+    $sample = Sample 0 'process-A' @('inbound-A','inbound-B','inbound-C','inbound-D')
+    $sample.PeerBundle = $true
+    return $sample
+}
+$s = Update-InstantEvidence $null @((Bundle-Sample)) $t $true $true
+$s = Update-InstantEvidence $s @((Bundle-Sample)) $t.AddSeconds(2) $true $true
+Assert (-not $s.active) 'One native connection interval cannot confirm a UU session'
+$s = Update-InstantEvidence $s @((Bundle-Sample)) $t.AddSeconds(4) $true $true
+Assert $s.active 'Stable inbound multichannel UU session must be detectable without disk IO'
+for($i=1; $i -le 120; $i++) { $s = Update-InstantEvidence $s @((Bundle-Sample)) $t.AddSeconds(4+$i*2) $true $true }
+Assert ($s.active -and -not $s.quietSince) 'Native UU connection continuity must hold a static screen'
+$s = Update-InstantEvidence $s @((Sample 0 'process-A' @())) $t.AddSeconds(246) $true $true
+$s = Update-InstantEvidence $s @((Sample 0 'process-A' @())) $t.AddSeconds(426) $true $true
+Assert (-not $s.active) 'Disconnect must release even if the virtual adapter stays enabled'
+$s = Update-InstantEvidence $null @((Sample 0)) $t $true $true
+for($i=1; $i -le 3; $i++) { $s = Update-InstantEvidence $s @((Sample ($i*2MB))) $t.AddSeconds($i*2) $true $true }
+Assert (-not $s.active) 'A single UU handshake plus unrelated disk IO and adapter cannot confirm a session'
+$saved = @{ schema = 3; updated = $t.AddSeconds(4); tracking = @{ 'UU远程' = $confirmed } } | ConvertTo-Json -Depth 8 | ConvertFrom-Json
 $restored = Restore-InstantTracking $saved $t.AddSeconds(6)
 $s = Update-InstantEvidence $restored['UU远程'] @((Sample 2MB)) $t.AddSeconds(8)
 Assert $s.active 'Watcher restart must preserve a confirmed static session'
 Assert ((Restore-InstantTracking $saved $t.AddMinutes(10)).Count -eq 0) 'Stale saved tracking must not resurrect an old session'
+$saved.schema = 2
+Assert ((Restore-InstantTracking $saved $t.AddSeconds(6)).Count -eq 0) 'Old virtual-adapter-only tracking must be invalidated on upgrade'
 
 # Execute the actual main-task activity branch against controlled process snapshots.
 $activity = $null
@@ -104,14 +122,14 @@ function Main-Sample($Previous, [double]$Io, [array]$Connections, [double]$Cpu =
     $procs = @([pscustomobject]@{ Id = 100; Name = 'GameViewerServer'; StartTime = [datetime]$Started; CPU = $Cpu })
     $state = [pscustomobject]@{ procs = [pscustomobject]$Previous }
     $elapsedMin = $Elapsed; $now = $t
-    $ioByPid = @{ 100 = $Io }; $estConns = $Connections
+    $ioByPid = @{ 100 = $Io }; $estConns = $Connections; $tcpSnapshot = @($Connections) + @($Connections | ForEach-Object { [pscustomobject]@{ OwningProcess = $_.OwningProcess; State = 'Listen'; LocalPort = $_.LocalPort } })
     $newStreaks = @{}; $peerStreaksNew = @{}; $procInfo = @{}
     $findings = New-Object Collections.ArrayList
     $PeerPortExclude = @(80,443); $CpuActiveRateWithNet = 1; $IoActiveBytesPerMin = 1MB; $CpuStreakNeeded = 2
     . $activity
     return @{ procs = $procInfo; count = $findings.Count }
 }
-$peer = @([pscustomobject]@{ OwningProcess = 100; LocalAddress = '192.168.1.2'; LocalPort = 50000; RemoteAddress = '192.168.1.3'; RemotePort = 20000 })
+$peer = @(1..4 | ForEach-Object { [pscustomobject]@{ OwningProcess = 100; LocalAddress = '192.168.1.2'; LocalPort = (50000+$_); RemoteAddress = '192.168.1.3'; RemotePort = (20000+$_) } })
 $m = Main-Sample @{} 0 $peer
 $m = Main-Sample $m.procs 10MB $peer
 Assert ($m.count -eq 0) 'Main task must not bypass handshake confirmation with a single peer/strong IO sample'
@@ -163,17 +181,17 @@ try {
     Assert (-not $result.controlled) 'Old session/input latch must not prevent recovery'
     $baseline.controlled = $false
     $baseline | ConvertTo-Json -Depth 5 | Set-Content -LiteralPath $statePath -Encoding UTF8
-    @{ schema = 2; updated = (Get-Date).ToString('o'); lastAlert = (Get-Date).ToString('o'); activeTools = @('UU远程'); notifiedTools = @('UU远程') } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
+    @{ schema = 3; updated = (Get-Date).ToString('o'); lastAlert = (Get-Date).ToString('o'); activeTools = @('UU远程'); notifiedTools = @('UU远程') } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
     & (Join-Path $temp 'remote-guard.ps1')
     $result = Get-Content $statePath -Raw | ConvertFrom-Json
     Assert ($result.controlled -and $result.instantOwned -and $result.lastNotify) 'Main task must adopt an already notified instant session'
-    @{ schema = 2; updated = (Get-Date).ToString('o'); activeTools = @(); notifiedTools = @() } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
+    @{ schema = 3; updated = (Get-Date).ToString('o'); activeTools = @(); notifiedTools = @() } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
     & (Join-Path $temp 'remote-guard.ps1')
     $result = Get-Content $statePath -Raw | ConvertFrom-Json
     Assert (-not $result.controlled) 'Main task must not add another three-minute hold after instant recovery'
-    # UU 虚拟显示器激活：纯中继/静态画面下会话在场的硬证据，必须维持受控且不清除静默计时陷阱
+    # 常驻虚拟显示器不能独立建立或续期受控状态。
     # 注意：mock 通过 $global: 与被 & 调用的子脚本连通（$script: 作用域不跨脚本）
-    @{ schema = 2; updated = (Get-Date).ToString('o'); activeTools = @(); notifiedTools = @() } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
+    @{ schema = 3; updated = (Get-Date).ToString('o'); activeTools = @(); notifiedTools = @() } | ConvertTo-Json | Set-Content $instantPath -Encoding UTF8
     $global:vdisplayFixture = $false
     $vdAdapter = [pscustomobject]@{ Name = 'GameViewer Virtual Display Adapter'; Availability = 3; CurrentHorizontalResolution = 1920 }
     function Get-CimInstance {
@@ -185,16 +203,16 @@ try {
     $global:vdisplayFixture = $true
     & (Join-Path $temp 'remote-guard.ps1')
     $result = Get-Content $statePath -Raw | ConvertFrom-Json
-    Assert ($result.controlled) 'Virtual display activity must hold the controlled state without instant ownership'
+    Assert (-not $result.controlled) 'Virtual display alone must not start a main-task session'
     $baseline2 = @{ lastRun = (Get-Date).AddMinutes(-1).ToString('o'); controlled = $true; since = (Get-Date).AddMinutes(-20).ToString('o'); quietSince = (Get-Date).AddMinutes(-4).ToString('o'); rdpDenyPrev = 1; svcStates = @{ ToDesk = @{ state = 'Stopped' } }; seenEvents = @{}; uuVDisplay = $true }
     $baseline2 | ConvertTo-Json -Depth 5 | Set-Content $statePath -Encoding UTF8
     & (Join-Path $temp 'remote-guard.ps1')
     $result = Get-Content $statePath -Raw | ConvertFrom-Json
-    Assert ($result.controlled -and -not $result.quietSince) 'Virtual display must reset the quiet timer while holding control'
+    Assert (-not $result.controlled) 'Virtual display must not reset a disconnected main-task quiet timer'
     $global:vdisplayFixture = $false
     & (Join-Path $temp 'remote-guard.ps1')
     $result = Get-Content $statePath -Raw | ConvertFrom-Json
-    Assert ($result.controlled -and $result.quietSince) 'Losing the virtual display must start the quiet timer, not release instantly'
+    Assert (-not $result.controlled) 'Virtual display removal cannot recreate a session'
     $baseline3 = @{ lastRun = (Get-Date).AddMinutes(-1).ToString('o'); controlled = $true; since = (Get-Date).AddMinutes(-20).ToString('o'); quietSince = (Get-Date).AddMinutes(-4).ToString('o'); rdpDenyPrev = 1; svcStates = @{ ToDesk = @{ state = 'Stopped' } }; seenEvents = @{}; uuVDisplay = $false }
     $baseline3 | ConvertTo-Json -Depth 5 | Set-Content $statePath -Encoding UTF8
     & (Join-Path $temp 'remote-guard.ps1')

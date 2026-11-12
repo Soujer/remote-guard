@@ -56,7 +56,7 @@ $SvcDefs = @(
 $uuSessionPath = $null
 try {
     $gvp = Get-Process -Name 'GameViewerServer' -ErrorAction SilentlyContinue | Select-Object -First 1
-    if ($gvp -and $gvp.Path) { $uuSessionPath = Join-Path (Split-Path (Split-Path (Split-Path $gvp.Path))) 'config\server\*.ini' }
+    if ($gvp -and $gvp.Path) { $uuSessionPath = Join-Path (Split-Path (Split-Path $gvp.Path)) 'config\server\*.ini' }
 } catch { }
 $tdSessionPath = $null
 try {
@@ -220,7 +220,7 @@ $instantFresh = $false
 try {
     $instant = Get-Content -LiteralPath (Join-Path $Root 'instant-state.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
     $instantAge = ($now - [datetime]::Parse($instant.updated)).TotalSeconds
-    $instantFresh = ($instant.schema -eq 2 -and $instantAge -ge 0 -and $instantAge -le 15)
+    $instantFresh = ($instant.schema -eq 3 -and $instantAge -ge 0 -and $instantAge -le 15)
 } catch { }
 
 # ---------- 采集 ----------
@@ -231,7 +231,10 @@ $peerStreaksNew = @{}
 
 $allProcs = @(Get-Process -ErrorAction SilentlyContinue)
 $estConns = @()
-try { $estConns = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Established' }) } catch {
+try {
+    $tcpSnapshot = @(Get-NetTCPConnection -ErrorAction Stop)
+    $estConns = @($tcpSnapshot | Where-Object { $_.State -eq 'Established' })
+} catch {
     if ($DryRun) { throw }
     Write-Log '网络采样失败，保留上轮状态，不判定解除'
     return
@@ -327,6 +330,14 @@ foreach ($def in $ToolDefs) {
                 $io = $(if ($ioByPid.ContainsKey([int]$p.Id)) { $ioByPid[[int]$p.Id] } else { $null })
                 $conns = @($estConns | Where-Object { $_.OwningProcess -eq $p.Id -and (Test-RemoteAddress $_.RemoteAddress) })
                 $peer = @($conns | Where-Object { $PeerPortExclude -notcontains $_.RemotePort })
+                $bundle = $false
+                if ($def.Name -eq 'UU远程') {
+                    $ports = @($tcpSnapshot | Where-Object { $_.OwningProcess -eq $p.Id -and $_.State -eq 'Listen' } | ForEach-Object LocalPort)
+                    $peer = @($peer | Where-Object { $ports -contains $_.LocalPort })
+                    foreach ($group in @($peer | Group-Object RemoteAddress)) {
+                        if (@($group.Group.LocalPort | Select-Object -Unique).Count -ge 3) { $bundle = $true }
+                    }
+                }
                 $cpuRate = 0.0
                 $ioRate = 0.0
                 $prev = $null
@@ -346,6 +357,10 @@ foreach ($def in $ToolDefs) {
                 $support = ($hasPeer -or $hasSession -or $cpuOk)
                 $candidate = ($valid -and $conns.Count -gt 0 -and $ioRate -ge $IoActiveBytesPerMin -and $support)
                 $peerKeys = @($peer | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort })
+                if ($def.Name -eq 'UU远程') {
+                    $bundleStable = ($valid -and $bundle -and $prev.peerBundle -and @($peerKeys | Where-Object { $prev.observedPeers -contains $_ }).Count -ge 3)
+                    $candidate = (($def.PeerProcs -contains $p.Name) -and ($bundleStable -or ($candidate -and $hasSession)))
+                }
                 $confirmedPeers = @()
                 $continuing = $false
                 if ($valid -and $prev.confirmedPeers) {
@@ -356,11 +371,11 @@ foreach ($def in $ToolDefs) {
                 if ($candidate) { $streak = 1 + [int]$prev.confirmations }
                 if ($continuing) { $streak = [Math]::Max($streak, $CpuStreakNeeded) }
                 if ($candidate -and $streak -ge $CpuStreakNeeded) { $confirmedPeers = $peerKeys }
-                $procInfo[$key] = @{ name = $p.Name; started = $started; cpu = $cpu; io = $io; confirmations = $streak; confirmedPeers = $confirmedPeers }
+                $procInfo[$key] = @{ name = $p.Name; started = $started; cpu = $cpu; io = $io; confirmations = $streak; confirmedPeers = $confirmedPeers; observedPeers = $peerKeys; peerBundle = $bundle }
                 $newStreaks[$def.Name] = [Math]::Max($newStreaks[$def.Name], $streak)
                 if ($hasPeer) { $peerStreaksNew[$def.Name] = $streak }
                 if ($streak -ge $CpuStreakNeeded) {
-                    $detail = $(if ($continuing) { '已确认会话连接仍在（静态画面无需持续流量）' } else { '同一进程连续 {0} 轮连接与活动确认，IO {1:N1} MB/分钟' -f $streak, ($ioRate / 1MB) })
+                    $detail = $(if ($continuing) { '已确认会话连接仍在（静态画面无需持续流量）' } elseif ($def.Name -eq 'UU远程' -and $bundleStable) { 'UU 同一对端至少 3 个被控监听端口连续确认' } else { '同一进程连续 {0} 轮连接与活动确认，IO {1:N1} MB/分钟' -f $streak, ($ioRate / 1MB) })
                     [void]$findings.Add([pscustomobject]@{ Tool = $def.Name; Pid = $p.Id; Detail = $detail; Real = $true })
                 }
             }
@@ -584,22 +599,7 @@ $controlled = ($findings.Count -gt 0)
 $detailLines = @($findings | ForEach-Object { '· {0}: {1}' -f $_.Tool, $_.Detail })
 $instantOwnsCurrent = ($instantFresh -and $controlled -and @($findings | Where-Object { $instant.notifiedTools -notcontains $_.Tool }).Count -eq 0)
 
-# ---------- UU 虚拟显示器：纯中继/静态画面下"会话在场"的硬证据 ----------
-# 虚拟显示器只在被控会话中激活（直连休眠、ini 停更、IO 归零时它仍在），
-# 激活即维持受控状态；解除必须等它消失。跳变通知由 RemindMinutes 防抖兜底。
-if ($uuVDisplayActive) {
-    $uuVdPrev = $false
-    if ($state -and $state.uuVDisplay) { $uuVdPrev = [bool]$state.uuVDisplay }
-    if (-not ($instantFresh -and $instant.activeTools -contains 'UU远程')) {
-        # 即时通道已确认 UU 会话时不重复加 finding（避免双通道重复推送）
-        $vdFinding = [pscustomobject]@{ Tool = 'UU远程'; Pid = '-'; Detail = '虚拟显示器激活（被控会话在场）'; Real = $true }
-        [void]$findings.Add($vdFinding)
-        if (-not $controlled) { $detailLines = @('· UU远程: 虚拟显示器激活（被控会话在场）') }
-        $controlled = $true
-        $instantOwnsCurrent = $false
-    }
-}
-
+# 虚拟显示器仅供诊断，不代表远控会话存在。
 # ---------- 受控粘滞：防"静态画面/直连休眠"误恢复 ----------
 # 真会话确认后信号可能暂时归零：UU 静态画面时 GPU 编码器不产出（串流 IO 掉到空闲基线），
 # P2P 直连可能被断开省资源——但会话并没有结束！

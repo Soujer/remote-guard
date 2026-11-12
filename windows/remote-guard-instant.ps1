@@ -78,18 +78,18 @@ function Invoke-Bark([string]$Title, [string]$Body) {
 }
 
 # 同一进程、连续采样确认；已确认的端点不要求静态画面持续产生流量。
-function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now, [bool]$VDisplayActive) {
+function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now, [bool]$VDisplayActive, [bool]$RequireUuEvidence = $false) {
     if (-not $Previous) { $Previous = @{ active = $false; samples = @{}; quietSince = $null; notified = $false } }
-    $next = @{ active = $false; samples = @{}; quietSince = $Previous.quietSince; notified = $Previous.notified; pendingRecovery = $Previous.pendingRecovery; lastPushAttempt = $Previous.lastPushAttempt }
+    $next = @{ active = $false; samples = @{}; quietSince = $Previous.quietSince; notified = $Previous.notified; pendingRecovery = $Previous.pendingRecovery; lastPushAttempt = $Previous.lastPushAttempt; reason = $Previous.reason }
     $evidence = $false
-    # UU 虚拟显示器激活 = 被控会话在场的硬证据（纯中继/静态画面下唯一可靠信号）
-    if ($VDisplayActive) { $evidence = $true }
+    # VDisplayActive 仅保留参数兼容：驱动可常驻，不能建立或维持会话。
     foreach ($sample in $Samples) {
         $key = [string]$sample.Id
         $prev = $Previous.samples[$key]
         $seconds = 0
         if ($prev) { $seconds = ($Now - $prev.time).TotalSeconds }
-        $valid = ($prev -and $sample.Started -and $prev.started -eq $sample.Started -and $seconds -gt 0 -and $seconds -le 10 -and $null -ne $sample.Io -and $null -ne $prev.io -and $sample.Io -ge $prev.io)
+        $sameProcess = ($prev -and $sample.Started -and $prev.started -eq $sample.Started -and $seconds -gt 0 -and $seconds -le 10)
+        $valid = ($sameProcess -and $null -ne $sample.Io -and $null -ne $prev.io -and $sample.Io -ge $prev.io)
         $delta = 0
         if ($valid) { $delta = $sample.Io - $prev.io }
         $overlap = @()
@@ -97,17 +97,23 @@ function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now, [boo
             $overlap = @($sample.PeerKeys | Where-Object { $prev.confirmedPeers -contains $_ })
         }
         $streak = 0
+        $bundleStable = ($sameProcess -and $sample.PeerBundle -and $prev.peerBundle -and @($sample.PeerKeys | Where-Object { $prev.observedPeers -contains $_ }).Count -ge 3)
         # 新会话至少连续两次有有效流量，不能累计十几秒的后台文件 IO。
-        if ($valid -and $sample.HasNet -and ($sample.PeerKeys.Count -gt 0 -or $sample.FreshSession) -and $delta -ge 512KB) {
+        $flowCandidate = ($valid -and $sample.HasNet -and ($sample.PeerKeys.Count -gt 0 -or $sample.FreshSession) -and $delta -ge 512KB)
+        if ($RequireUuEvidence) { $flowCandidate = ($flowCandidate -and $sample.FreshSession) }
+        if ($flowCandidate -or ($RequireUuEvidence -and $bundleStable)) {
             $streak = 1 + [int]$prev.streak
         }
         $confirmedPeers = @()
         if ($Previous.active -and $prev -and $prev.started -eq $sample.Started) { $confirmedPeers = @($prev.confirmedPeers) }
-        if ($streak -ge 2) { $confirmedPeers = @($sample.PeerKeys); $evidence = $true }
+        if ($streak -ge 2) {
+            $confirmedPeers = @($sample.PeerKeys); $evidence = $true
+            $next.reason = $(if ($RequireUuEvidence -and $bundleStable) { 'UU 同一对端至少 3 个被控监听端口连续确认' } else { '会话连接与活动连续确认' })
+        }
         if ($Previous.active -and $overlap.Count -gt 0) { $evidence = $true }
         # 已确认的中继会话仍需当前会话文件和 IO 佐证，443 心跳不能单独续期。
         if ($Previous.active -and $valid -and $sample.HasNet -and $sample.FreshSession -and ($delta / $seconds * 60) -ge 1MB) { $evidence = $true }
-        $next.samples[$key] = @{ started = $sample.Started; time = $Now; io = $sample.Io; streak = $streak; confirmedPeers = $confirmedPeers }
+        $next.samples[$key] = @{ started = $sample.Started; time = $Now; io = $sample.Io; streak = $streak; confirmedPeers = $confirmedPeers; observedPeers = @($sample.PeerKeys); peerBundle = [bool]$sample.PeerBundle }
     }
     if ($evidence) {
         $next.active = $true
@@ -124,7 +130,7 @@ function Update-InstantEvidence($Previous, [array]$Samples, [datetime]$Now, [boo
 
 function Restore-InstantTracking($Saved, [datetime]$Now) {
     $restored = @{}
-    if (-not $Saved -or $Saved.schema -ne 2 -or -not $Saved.updated) { return $restored }
+    if (-not $Saved -or $Saved.schema -ne 3 -or -not $Saved.updated) { return $restored }
     $age = ($Now.ToUniversalTime() - ([datetime]$Saved.updated).ToUniversalTime()).TotalSeconds
     if ($age -lt 0 -or $age -gt 180) { return $restored }
     foreach ($entry in $Saved.tracking.PSObject.Properties) {
@@ -132,9 +138,9 @@ function Restore-InstantTracking($Saved, [datetime]$Now) {
         $samples = @{}
         foreach ($sp in $value.samples.PSObject.Properties) {
             $v = $sp.Value
-            $samples[$sp.Name] = @{ started = $v.started; time = ([datetime]$v.time).ToLocalTime(); io = $v.io; streak = $v.streak; confirmedPeers = @($v.confirmedPeers) }
+            $samples[$sp.Name] = @{ started = $v.started; time = ([datetime]$v.time).ToLocalTime(); io = $v.io; streak = $v.streak; confirmedPeers = @($v.confirmedPeers); observedPeers = @($v.observedPeers); peerBundle = [bool]$v.peerBundle }
         }
-        $restored[$entry.Name] = @{ active = [bool]$value.active; notified = [bool]$value.notified; samples = $samples; quietSince = $(if ($value.quietSince) { ([datetime]$value.quietSince).ToLocalTime() } else { $null }); pendingRecovery = [bool]$value.pendingRecovery; lastPushAttempt = $(if ($value.lastPushAttempt) { ([datetime]$value.lastPushAttempt).ToLocalTime() } else { $null }) }
+        $restored[$entry.Name] = @{ active = [bool]$value.active; notified = [bool]$value.notified; samples = $samples; quietSince = $(if ($value.quietSince) { ([datetime]$value.quietSince).ToLocalTime() } else { $null }); pendingRecovery = [bool]$value.pendingRecovery; lastPushAttempt = $(if ($value.lastPushAttempt) { ([datetime]$value.lastPushAttempt).ToLocalTime() } else { $null }); reason = $value.reason }
     }
     return $restored
 }
@@ -157,7 +163,7 @@ try {
         @{ name = 'ToDesk'; procs = @('ToDesk','ToDesk_Session') }
     )
     $states = @{}
-    $ist = @{ schema = 2; updated = $null; activeTools = @(); notifiedTools = @(); lastAlert = $null; lastTool = $null; lastRecovery = $null; tracking = @{} }
+    $ist = @{ schema = 3; updated = $null; activeTools = @(); notifiedTools = @(); lastAlert = $null; lastTool = $null; lastRecovery = $null; tracking = @{} }
     try {
         $saved = Get-Content -LiteralPath $InstState -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
         $states = Restore-InstantTracking $saved (Get-Date)
@@ -168,21 +174,13 @@ try {
     while ($true) {
         try {
             $now = Get-Date
-            $connections = @(Get-NetTCPConnection -ErrorAction Stop | Where-Object { $_.State -eq 'Established' })
+            $tcp = @(Get-NetTCPConnection -ErrorAction Stop)
+            $connections = @($tcp | Where-Object { $_.State -eq 'Established' })
             $io = @{}
             foreach ($pf in @(Get-CimInstance Win32_PerfRawData_PerfProc_Process -ErrorAction Stop)) {
                 $io[[int]$pf.IDProcess] = [double]$pf.IODataBytesPersec
             }
             if ($io.Count -eq 0) { throw '性能采样为空' }
-            # UU 虚拟显示器状态（低频采样，仅每 30 秒刷新一次缓存）
-            if (-not $script:vdispChecked -or (($now - $script:vdispChecked).TotalSeconds -ge 30)) {
-                $script:vdispActive = $false
-                try {
-                    $uuVc = @(Get-CimInstance Win32_VideoController -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq 'GameViewer Virtual Display Adapter' })
-                    if ($uuVc.Count -gt 0 -and $uuVc[0].Availability -eq 3 -and $uuVc[0].CurrentHorizontalResolution -gt 0) { $script:vdispActive = $true }
-                } catch { }
-                $script:vdispChecked = $now
-            }
             foreach ($tool in $tools) {
                 $samples = @()
                 foreach ($p in @(Get-Process -Name $tool.procs -ErrorAction SilentlyContinue)) {
@@ -191,7 +189,7 @@ try {
                     try {
                         $started = $p.StartTime.ToUniversalTime().ToString('o')
                         if ($p.Path -and $tool.name -eq 'UU远程') {
-                            $sessionGlob = Join-Path (Split-Path (Split-Path (Split-Path $p.Path))) 'config\server\*.ini'
+                            $sessionGlob = Join-Path (Split-Path (Split-Path $p.Path)) 'config\server\*.ini'
                         } elseif ($p.Path) {
                             $sessionGlob = Join-Path (Split-Path $p.Path) 'Logs\session*.xlog'
                         }
@@ -205,13 +203,20 @@ try {
                         $fresh = ($files.Count -gt 0)
                     }
                     $conns = @($connections | Where-Object { $_.OwningProcess -eq $p.Id -and (Test-RemoteAddress $_.RemoteAddress) })
+                    $hasNet = ($conns.Count -gt 0)
+                    $bundle = $false
+                    if ($tool.name -eq 'UU远程') {
+                        $ports = @($tcp | Where-Object { $_.OwningProcess -eq $p.Id -and $_.State -eq 'Listen' } | ForEach-Object LocalPort)
+                        $conns = @($conns | Where-Object { $ports -contains $_.LocalPort -and $_.RemotePort -notin @(80,443) })
+                        foreach ($group in @($conns | Group-Object RemoteAddress)) {
+                            if (@($group.Group.LocalPort | Select-Object -Unique).Count -ge 3) { $bundle = $true }
+                        }
+                    }
                     $peers = @($conns | Where-Object { $_.RemotePort -notin @(80,443) } | ForEach-Object { '{0}|{1}|{2}|{3}' -f $_.LocalAddress, $_.LocalPort, $_.RemoteAddress, $_.RemotePort })
-                    $samples += @{ Id = $p.Id; Started = $started; Io = $(if ($io.ContainsKey([int]$p.Id)) { $io[[int]$p.Id] } else { $null }); PeerKeys = $peers; HasNet = ($conns.Count -gt 0); FreshSession = $fresh }
+                    $samples += @{ Id = $p.Id; Started = $started; Io = $(if ($io.ContainsKey([int]$p.Id)) { $io[[int]$p.Id] } else { $null }); PeerKeys = $peers; HasNet = $hasNet; FreshSession = $fresh; PeerBundle = $bundle }
                 }
                 $previous = $states[$tool.name]
-                # UU 虚拟显示器激活只对 UU 会话构成在场证据
-                $vdActive = (($tool.name -eq 'UU远程') -and [bool]$script:vdispActive)
-                $next = Update-InstantEvidence $previous $samples $now $vdActive
+                $next = Update-InstantEvidence $previous $samples $now $false ($tool.name -eq 'UU远程')
                 $canPush = (-not $next.lastPushAttempt -or ($now - $next.lastPushAttempt).TotalSeconds -ge 10)
                 if ($next.active -and -not $next.notified -and $canPush) {
                     # 从分钟任务接管已通知的会话时，不再重复发送进入通知。
@@ -226,7 +231,7 @@ try {
                 }
                 if ($next.active -and -not $next.notified -and $canPush) {
                     $next.lastPushAttempt = $now
-                    $body = '同一进程连续流量与连接确认: ' + $tool.name + ' 主机: ' + $env:COMPUTERNAME + ' 时间: ' + $now.ToString('yyyy-MM-dd HH:mm:ss')
+                    $body = $next.reason + ': ' + $tool.name + ' 主机: ' + $env:COMPUTERNAME + ' 时间: ' + $now.ToString('yyyy-MM-dd HH:mm:ss')
                     if (Send-Push '远程控制告警' $body) {
                         $next.notified = $true
                         $ist.lastAlert = $now.ToString('o')
