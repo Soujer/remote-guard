@@ -24,7 +24,7 @@
 #      - Defender 近 2 天有威胁检出（事件 1116/1117）
 #      - 未知进程监听常见远控端口（5800/5900/5938/21115-21119 等）
 #
-# 推送：Bark，进入受控状态立即推送；持续受控每 30 分钟提醒一次；解除时推送恢复。
+# 推送：仅在连接和断开时通知，持续连接不重复提醒。
 # 病毒性远程按事件推送（同一事件只推一次，7 天 TTL 去重），不发恢复消息。
 # 由计划任务 remote-guard 每分钟通过 remote-guard-launcher.vbs 隐藏调用（零闪屏）。
 # ============================================================
@@ -43,7 +43,6 @@ $LogFile   = Join-Path $Root 'remote-guard.log'
 $CpuActiveRateWithNet = 1.0   # 有远程连接时的宽松阈值（80/443 常驻信令会干扰，不能设太低）
 $CpuStreakNeeded      = 2     # 连续命中次数（每分钟一次采样）
 $IoActiveBytesPerMin  = 1MB   # 串流流量判定：进程 IO ≥1 MB/分钟（空闲仅几 KB）
-$RemindMinutes        = 30    # 持续受控的提醒间隔（分钟）
 $NotifyRecovery       = $true # 解除时是否推送恢复消息
 $InputWindowSec       = 25    # 输入注入传感器采样窗口（秒，逐秒采样）
 # 远控服务状态仅供诊断，升级/自启也会启动服务
@@ -683,30 +682,39 @@ if ($DryRun) {
 }
 
 # ---------- 推送 ----------
-$body = '检测到本机可能正被远程控制：' + "`r`n" + ($detailLines -join "`r`n") + "`r`n主机: $env:COMPUTERNAME  用户: $env:USERNAME" + "`r`n时间: " + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
+$pushTools = @($findings | ForEach-Object { $_.Tool } | Select-Object -Unique)
+if ($pushTools.Count -eq 0 -and $state -and $state.tools) { $pushTools = @($state.tools) }
+$pushTitle = $(if ($pushTools.Count -gt 0) { $pushTools -join '、' } else { '远程控制' })
+$connectionNotified = $false
+if ($wasControlled -and $state) {
+    if ($state.PSObject.Properties.Name -contains 'connectionNotified') { $connectionNotified = [bool]$state.connectionNotified }
+    else { $connectionNotified = ($null -ne $lastNotify) }
+}
 
 if (-not $Seed) {
     if ($controlled) {
         $needNotify = $false
         if (-not $wasControlled) {
-            if ($instantOwnsCurrent) { $lastNotify = [datetime]::Parse($instant.lastAlert) }
+            if ($instantOwnsCurrent) { $lastNotify = [datetime]::Parse($instant.lastAlert); $connectionNotified = $true }
             else { $needNotify = $true }
         }
-        elseif ($null -eq $lastNotify -or ($now - $lastNotify).TotalMinutes -ge $RemindMinutes) { $needNotify = $true }
+        elseif (-not $connectionNotified -and -not $instantOwnsCurrent) { $needNotify = $true }
+        if ($instantOwnsCurrent) { $connectionNotified = $true }
 
         if ($needNotify) {
-            if (Invoke-Bark '远程控制告警' $body) {
+            if (Invoke-Bark $pushTitle '已连接') {
                 $lastNotify = $now
+                $connectionNotified = $true
                 Write-Log ('告警已推送: ' + ($detailLines -join ' | '))
             } else {
                 Write-Log ('告警推送失败（下次重试）: ' + ($detailLines -join ' | '))
             }
         } else {
-            Write-Log ('仍在受控（未到提醒间隔）: ' + ($detailLines -join ' | '))
+            Write-Log ('仍在受控（不重复通知）: ' + ($detailLines -join ' | '))
         }
     } else {
         if ($wasControlled -and $NotifyRecovery -and -not ($instantFresh -and $state.instantOwned)) {
-            $ok = Invoke-Bark '远程控制已解除' ('本机远程控制迹象已消失。主机: ' + $env:COMPUTERNAME + '  时间: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'))
+            $ok = Invoke-Bark $pushTitle '已断开'
             if ($ok) { $lastNotify = $now }
             Write-Log ('已恢复: ' + $(if ($ok) { '已推送' } else { '推送失败' }))
         }
@@ -755,10 +763,11 @@ $newState = [ordered]@{
     lastRun    = $now.ToString('o')
     controlled = $stateControlled
     instantOwned = $instantOwnsCurrent
-    tools      = @($findings | ForEach-Object { $_.Tool } | Select-Object -Unique)
+    tools      = $(if ($stateControlled) { $pushTools } else { @() })
     since      = $sinceValue
     quietSince = $quietSinceOut
     lastNotify = $(if ($lastNotify) { $lastNotify.ToString('o') } else { $null })
+    connectionNotified = $connectionNotified
     procs      = $procInfo
     streaks    = $newStreaks
     peerStreaks = $peerStreaksNew

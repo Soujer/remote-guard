@@ -236,7 +236,7 @@ try {
                     try {
                         $main = Get-Content -LiteralPath (Join-Path $Root 'state.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
                         $mainAge = ($now - [datetime]$main.lastRun).TotalSeconds
-                        if ($main.controlled -and $main.tools -contains $tool.name -and $mainAge -ge 0 -and $mainAge -le 90 -and $main.lastNotify -and ($now - [datetime]$main.lastNotify).TotalMinutes -lt 30) {
+                        if ($main.controlled -and $main.tools -contains $tool.name -and $mainAge -ge 0 -and $mainAge -le 90 -and $main.lastNotify -and (-not $ist.lastRecovery -or [datetime]$main.lastRun -ge [datetime]$ist.lastRecovery)) {
                             $next.notified = $true
                             $ist.lastAlert = $main.lastNotify
                         }
@@ -244,8 +244,7 @@ try {
                 }
                 if ($next.active -and -not $next.notified -and $canPush) {
                     $next.lastPushAttempt = $now
-                    $body = $next.reason + ': ' + $tool.name + ' 主机: ' + $env:COMPUTERNAME + ' 时间: ' + $now.ToString('yyyy-MM-dd HH:mm:ss')
-                    if (Send-Push '远程控制告警' $body) {
+                    if (Send-Push $tool.name '已连接') {
                         $next.notified = $true
                         $ist.lastAlert = $now.ToString('o')
                         $ist.lastTool = $tool.name
@@ -253,7 +252,7 @@ try {
                     }
                 } elseif ($next.pendingRecovery -and $canPush) {
                     $next.lastPushAttempt = $now
-                    if (Send-Push '远程控制已解除' ('会话信号连续 3 分钟消失: ' + $tool.name + ' 主机: ' + $env:COMPUTERNAME)) {
+                    if (Send-Push $tool.name '已断开') {
                         $next.pendingRecovery = $false
                         Write-Log ('即时通道已恢复: ' + $tool.name)
                     } else { Write-Log ('解除推送失败: ' + $tool.name) }
