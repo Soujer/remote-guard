@@ -6,3 +6,4 @@ instant-state.json.tmp
 state.json
 *.log
 *.log.1
+/release/

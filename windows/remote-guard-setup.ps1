@@ -17,7 +17,8 @@ Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 $InstallRoot = 'C:\remote-guard'
 if (-not (Test-Path $InstallRoot)) { $InstallRoot = Join-Path $env:USERPROFILE 'remote-guard' }
 $SetupDir    = $PSScriptRoot
-if (-not $SetupDir) { $SetupDir = Split-Path -Parent $MyInvocation.MyCommand.Path }
+# ps2exe 编译后没有脚本路径，守护文件仍位于 exe 同目录。
+if (-not $SetupDir) { $SetupDir = [AppDomain]::CurrentDomain.BaseDirectory }
 
 # ---------- 布局 ----------
 $form                = New-Object System.Windows.Forms.Form

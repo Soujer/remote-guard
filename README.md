@@ -6,7 +6,7 @@
 
 ## 下载
 
-到 [Releases](https://gitee.com/Soujer/remote-guard/releases) 下载对应平台发行版：
+到 [GitHub Releases](https://github.com/Soujer/remote-guard/releases/latest) 下载对应平台发行版。当前版本：**v1.1.0**。
 
 | 平台 | 发行包 | 使用 |
 |---|---|---|
@@ -118,6 +118,14 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Regression.p
 回归覆盖握手、静态画面、网络抖动、心跳残留、采样失败、PID 复用、守护进程重启和双通道状态协调。测试使用模拟数据，不发送推送，不启动守护进程。
 
 更新已安装的版本：把 `windows/` 中的新版脚本放在同一目录，运行 `remote-guard-setup.ps1`，选择原安装目录并点击“一键部署”，以替换脚本并重启即时进程。已有 `release/` 发行包不会随源码修改自动更新。
+
+重新打包发行版（Windows，需要已安装 ps2exe）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.1.0
+```
+
+产物写入 `release/`，包含 Windows ZIP、macOS TAR.GZ 和 SHA-256 校验文件；每个平台包内的 `VERSION` 记录版本及源码提交。
 
 ## 已知限制
 
