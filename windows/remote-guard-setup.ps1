@@ -14,6 +14,11 @@
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
+# 部分老系统/老 .NET 默认只启用 TLS1.0，访问 mp.weixin.qq.com 会握手失败导致二维码下载不到
+try {
+    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
+} catch { }
+
 $InstallRoot = 'C:\remote-guard'
 if (-not (Test-Path $InstallRoot)) { $InstallRoot = Join-Path $env:USERPROFILE 'remote-guard' }
 $SetupDir    = $PSScriptRoot
@@ -199,34 +204,75 @@ function Test-Bark([string]$Key) {
     } catch { Set-Status ('Bark 测试失败: ' + $_.Exception.Message) 'Red' }
 }
 
+# ---------- hayo 扫码登录辅助 ----------
+# 说明：wxLogin 只返回 ticket，二维码图片需要再向微信换取。
+# 这里对“取 ticket”和“换图片”都做多入口 + 重试 + 内容校验，
+# 避免单次网络抖动 / CDN 节点异常 / 返回错误页时二维码直接空白。
+$script:HayoHosts = @('https://www.hayo.cn', 'https://hayo.svip8.vip')
+$script:qrStream  = $null
+
+function Get-HayoLoginTicket {
+    $lastErr = '未知错误'
+    foreach ($base in $script:HayoHosts) {
+        for ($i = 1; $i -le 2; $i++) {
+            try {
+                $uri = $base + '/wxLogin?_=' + [DateTime]::Now.Ticks
+                $res = Invoke-RestMethod -Uri $uri -Method Get -TimeoutSec 15
+                if ([string]$res.status -eq '1' -and $res.ticket) { $script:HayoLoginHost = $base; return [string]$res.ticket }
+                $lastErr = ($res | ConvertTo-Json -Compress)
+            } catch { $lastErr = $_.Exception.Message }
+            Start-Sleep -Milliseconds 700
+        }
+    }
+    throw ('获取 ticket 失败: ' + $lastErr)
+}
+
+function Get-HayoQrBytes([string]$Ticket) {
+    $url = 'https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=' + [uri]::EscapeDataString($Ticket)
+    $lastErr = '未知错误'
+    for ($i = 1; $i -le 4; $i++) {
+        try {
+            $wc = New-Object System.Net.WebClient
+            $wc.Headers.Add('User-Agent', 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) remote-guard/1.1')
+            $bytes = $wc.DownloadData($url)
+            if ($bytes -and $bytes.Length -gt 1024) {
+                $isPng = ($bytes[0] -eq 0x89 -and $bytes[1] -eq 0x50)
+                $isJpg = ($bytes[0] -eq 0xFF -and $bytes[1] -eq 0xD8)
+                $isGif = ($bytes[0] -eq 0x47 -and $bytes[1] -eq 0x49)
+                if ($isPng -or $isJpg -or $isGif) { return ,$bytes }
+                $lastErr = '返回内容不是图片（' + $bytes.Length + ' 字节）'
+            } else {
+                $lastErr = '返回内容为空或过小（' + $(if ($bytes) { $bytes.Length } else { 0 }) + ' 字节）'
+            }
+        } catch { $lastErr = $_.Exception.Message }
+        Start-Sleep -Milliseconds 800
+    }
+    throw ('二维码图片获取失败: ' + $lastErr)
+}
+
 # ---------- hayo 扫码登录（同步流程 + DoEvents 保持窗口响应） ----------
 $btnHayoScan.Add_Click({
     if ($script:scanning) { return }
     $script:scanning = $true
     $btnHayoScan.Enabled = $false
+    if ($pbQr.Image) { $pbQr.Image.Dispose() }
     $pbQr.Image = $null
     try {
         Set-Status '正在获取登录二维码...'
         [System.Windows.Forms.Application]::DoEvents()
-        $wx = Invoke-RestMethod -Uri 'https://www.hayo.cn//wxLogin' -Method Get -TimeoutSec 15
-        if ($wx.status -ne '1') { Set-Status ('wxLogin 失败: ' + ($wx | ConvertTo-Json -Compress)) 'Red'; return }
-        $ticket = $wx.ticket
-        $imgFile = Join-Path $env:TEMP 'hayo-setup-qr.png'
-        $imgOk = $false
-        foreach ($attempt in 1..3) {
-            try {
-                Invoke-WebRequest -Uri ('https://mp.weixin.qq.com/cgi-bin/showqrcode?ticket=' + [uri]::EscapeDataString($ticket)) -OutFile $imgFile -TimeoutSec 30 -UseBasicParsing
-                if ((Test-Path $imgFile) -and ((Get-Item $imgFile).Length -gt 500)) { $imgOk = $true; break }
-            } catch { Start-Sleep -Seconds 1 }
-        }
-        if (-not $imgOk) { Set-Status '二维码下载失败，请重试' 'Red'; return }
-        $bytes = [System.IO.File]::ReadAllBytes($imgFile)
-        $ms = New-Object System.IO.MemoryStream(,$bytes)
-        $pbQr.Image = [System.Drawing.Image]::FromStream($ms)
+
+        $ticket = Get-HayoLoginTicket
+        $bytes  = Get-HayoQrBytes $ticket
+
+        # 图片流必须保持存活（GDI+ 要求流在 Image 使用期间不被回收），放到 script 作用域常驻
+        if ($script:qrStream) { $script:qrStream.Dispose() }
+        $script:qrStream = New-Object System.IO.MemoryStream(,$bytes)
+        $pbQr.Image = [System.Drawing.Image]::FromStream($script:qrStream)
         Set-Status '请用微信扫码并确认登录（2 分钟内有效）...'
         [System.Windows.Forms.Application]::DoEvents()
         # 轮询（独立会话，登录成功时服务端种 PHPSESSID）；每 2 秒让 UI 处理消息
         $sess = New-Object Microsoft.PowerShell.Commands.WebRequestSession
+        $loginHost = $(if ($script:HayoLoginHost) { $script:HayoLoginHost } else { 'https://www.hayo.cn' })
         $deadline = (Get-Date).AddMinutes(2)
         $gotToken = $null
         $pollTick = 0
@@ -236,7 +282,7 @@ $btnHayoScan.Add_Click({
             if ($pollTick -lt 2000) { [System.Windows.Forms.Application]::DoEvents(); continue }
             $pollTick = 0
             try {
-                $resp = Invoke-RestMethod -Uri ('https://www.hayo.cn//checkWxLogin?ticket=' + [uri]::EscapeDataString($ticket)) -WebSession $sess -TimeoutSec 15
+                $resp = Invoke-RestMethod -Uri ($loginHost + '/checkWxLogin?ticket=' + [uri]::EscapeDataString($ticket)) -WebSession $sess -TimeoutSec 15
             } catch { continue }
             [System.Windows.Forms.Application]::DoEvents()
             $st = [string]$resp.status
@@ -245,7 +291,7 @@ $btnHayoScan.Add_Click({
                 if ($resp.data) { $gotToken = [string]$resp.data }
                 else {
                     try {
-                        $gt = Invoke-RestMethod -Uri 'https://www.hayo.cn//getToken' -WebSession $sess -TimeoutSec 15
+                        $gt = Invoke-RestMethod -Uri ($loginHost + '/getToken') -WebSession $sess -TimeoutSec 15
                         if ($gt.status -eq 200 -and $gt.data) { $gotToken = [string]$gt.data }
                     } catch { }
                 }

@@ -6,7 +6,7 @@
 
 ## 下载
 
-到 [GitHub Releases](https://github.com/Soujer/remote-guard/releases/latest) 下载对应平台发行版。当前版本：**v1.1.0**。
+到 [GitHub Releases](https://github.com/Soujer/remote-guard/releases/latest) 下载对应平台发行版。当前版本：**v1.1.1**。
 
 | 平台 | 发行包 | 使用 |
 |---|---|---|
@@ -122,7 +122,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Regression.p
 重新打包发行版（Windows，需要已安装 ps2exe）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.1.0
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.1.1
 ```
 
 产物写入 `release/`，包含 Windows ZIP、macOS TAR.GZ 和 SHA-256 校验文件；每个平台包内的 `VERSION` 记录版本及源码提交。
