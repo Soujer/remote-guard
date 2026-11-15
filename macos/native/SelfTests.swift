@@ -110,6 +110,7 @@ enum SelfTests {
         let desktop = GuardDesktop(); desktop.buildWindow()
         try check(desktop.tabs.numberOfTabViewItems == 5, "Build all five native desktop pages")
         try check(desktop.playerView.showsFullScreenToggleButton, "Embedded macOS playback must provide a full-screen control")
+        try check(NSApp.mainMenu?.item(at: 1)?.submenu?.item(withTitle: "粘贴")?.keyEquivalent == "v", "Native text fields must support the standard paste shortcut")
         let output = ProcessInfo.processInfo.environment["GUARD_TEST_OUTPUT"].map { URL(fileURLWithPath: $0) }
         if let output {
             try ensureDirectory(output)

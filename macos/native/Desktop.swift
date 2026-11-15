@@ -4,7 +4,11 @@ import AVKit
 import ScreenCaptureKit
 import Security
 
-final class LayoutView: NSView { override var isFlipped: Bool { true } }
+final class LayoutView: NSView {
+    override var isFlipped: Bool { true }
+    override var isOpaque: Bool { true }
+    override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); dirtyRect.fill(); super.draw(dirtyRect) }
+}
 final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     var settings = Settings()
     var window: NSWindow!
