@@ -542,7 +542,14 @@ $form.Add_FormClosed({
 if($SmokeTest){
     foreach($requiredCommand in @('Get-GuardFileHash','Get-ScheduledTask','Register-ScheduledTask','Get-CimInstance')){if(-not(Get-Command $requiredCommand -ErrorAction SilentlyContinue)){throw ('Missing runtime command: '+$requiredCommand)}}
     & $libraryView.RefreshAction
+    $originalBounds=$libraryView.Picture.Bounds
+    & $libraryView.ToggleFullScreen $false
+    if(-not $libraryView.FullScreen -or $libraryView.Picture.Parent -ne $libraryView.FullScreen -or $libraryView.Picture.Dock -ne 'Fill'){throw 'Fullscreen must reuse the existing playback surface'}
+    & $libraryView.FullScreenKeyAction $libraryView.FullScreen ([Windows.Forms.KeyEventArgs]::new([Windows.Forms.Keys]::Escape))
+    if($libraryView.FullScreen -or $libraryView.Picture.Parent -ne $tabLibrary -or $libraryView.Picture.Bounds -ne $originalBounds -or $libraryView.Picture.IsDisposed){throw 'Escape must restore the embedded playback surface'}
+    & $libraryView.ToggleFullScreen $false
     & $libraryView.StopAction
+    if($libraryView.FullScreen){throw 'Stopping playback must close fullscreen'}
     if($script:GuardEmbeddedPayload -and -not(Test-Path -LiteralPath $recordingView.Encoder.Text -PathType Leaf)){throw $recordingView.Status.Text}
     if(-not $recordingView.Config -and (Test-Path -LiteralPath $recordingView.Encoder.Text -PathType Leaf)){
         $recordingView.Enabled.Checked=$true;$recordingView.Password.Text='Test12345678';$recordingView.Confirm.Clear()

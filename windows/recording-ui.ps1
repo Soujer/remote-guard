@@ -80,7 +80,7 @@ function New-GuardRecordingView($Parent,$RootBox,[string]$Resources) {
 
 function New-GuardLibraryView($Parent,$RootBox) {
     # Event handlers run in their own closure module. Capture helper scriptblocks explicitly.
-    $view=[pscustomobject]@{Root=$RootBox;Player=$null;Picture=$null;List=$null;Key=$null;Password=$null;Status=$null;Timer=$null;Stop=${function:Stop-GuardPreview};Refresh=${function:Refresh-GuardLibrary};GetFiles=${function:Get-GuardRecordingFiles};RefreshAction=$null;StopAction=$null}
+    $view=[pscustomobject]@{Root=$RootBox;Player=$null;Picture=$null;List=$null;Key=$null;Password=$null;Status=$null;Timer=$null;Stop=${function:Stop-GuardPreview};Refresh=${function:Refresh-GuardLibrary};GetFiles=${function:Get-GuardRecordingFiles};RefreshAction=$null;StopAction=$null;FullScreen=$null;ToggleFullScreen=$null;RestoreFullScreen=$null;FullScreenKeyAction=$null;EmbeddedParent=$Parent;EmbeddedBounds=$null}
     $view.List=New-Object Windows.Forms.ListView;$view.List.View='Details';$view.List.FullRowSelect=$true;$view.List.MultiSelect=$false;$view.List.SetBounds(20,15,780,135)
     [void]$view.List.Columns.Add('录像时间（本机）',185);[void]$view.List.Columns.Add('大小',90);[void]$view.List.Columns.Add('文件名',485);$Parent.Controls.Add($view.List)
     $refresh=New-Object Windows.Forms.Button;$refresh.Text='刷新';$refresh.SetBounds(20,160,85,30);$Parent.Controls.Add($refresh)
@@ -92,7 +92,31 @@ function New-GuardLibraryView($Parent,$RootBox) {
     $play=New-Object Windows.Forms.Button;$play.Text='播放选中录像';$play.SetBounds(465,200,170,32);$Parent.Controls.Add($play)
     $stop=New-Object Windows.Forms.Button;$stop.Text='停止播放';$stop.SetBounds(650,200,150,32);$Parent.Controls.Add($stop)
     $view.Picture=New-Object Windows.Forms.PictureBox;$view.Picture.BackColor='Black';$view.Picture.SizeMode='Zoom';$view.Picture.SetBounds(90,245,640,300);$Parent.Controls.Add($view.Picture)
-    $view.Status=New-Object Windows.Forms.Label;$view.Status.SetBounds(20,555,780,35);$view.Status.Text='选择录像、私钥并输入密码，在当前窗口播放。';$Parent.Controls.Add($view.Status)
+    $view.Status=New-Object Windows.Forms.Label;$view.Status.SetBounds(20,555,650,35);$view.Status.Text='选择录像、私钥并输入密码；双击画面可全屏，Esc 退出。';$Parent.Controls.Add($view.Status)
+    $fullButton=New-Object Windows.Forms.Button;$fullButton.Text='全屏';$fullButton.SetBounds(690,550,110,32);$Parent.Controls.Add($fullButton)
+    $view.RestoreFullScreen={
+        if(-not $view.FullScreen){return}
+        $full=$view.FullScreen;$view.FullScreen=$null
+        $view.Picture.Dock='None';$view.EmbeddedParent.Controls.Add($view.Picture);$view.Picture.Bounds=$view.EmbeddedBounds
+        $full.Dispose()
+    }.GetNewClosure()
+    $view.FullScreenKeyAction={param($sender,$eventArgs)
+        if($eventArgs.KeyCode -eq [Windows.Forms.Keys]::Escape){$eventArgs.Handled=$true;$eventArgs.SuppressKeyPress=$true;& $view.RestoreFullScreen}
+    }.GetNewClosure()
+    $view.ToggleFullScreen={param([bool]$Show=$true)
+        if($view.FullScreen){& $view.RestoreFullScreen;return}
+        $full=New-Object Windows.Forms.Form;$full.Text='录像播放';$full.FormBorderStyle='None';$full.BackColor='Black';$full.KeyPreview=$true
+        $full.StartPosition='Manual';$full.Bounds=[Windows.Forms.Screen]::FromControl($view.Picture).Bounds
+        $view.EmbeddedBounds=$view.Picture.Bounds;$view.FullScreen=$full
+        $view.Picture.Dock='Fill';$full.Controls.Add($view.Picture)
+        $exit=New-Object Windows.Forms.Button;$exit.Text='退出全屏（Esc）';$exit.SetBounds(($full.ClientSize.Width-170),15,150,34);$exit.Anchor='Top, Right';$full.Controls.Add($exit);$exit.BringToFront()
+        $exit.Add_Click({& $view.RestoreFullScreen}.GetNewClosure())
+        $full.Add_KeyDown($view.FullScreenKeyAction)
+        $full.Add_FormClosing({& $view.RestoreFullScreen}.GetNewClosure())
+        if($Show){$full.Show($view.EmbeddedParent.FindForm());$full.Activate()}
+    }.GetNewClosure()
+    $fullButton.Add_Click({& $view.ToggleFullScreen $true}.GetNewClosure())
+    $view.Picture.Add_DoubleClick({& $view.ToggleFullScreen $true}.GetNewClosure())
     $view.RefreshAction={& $view.Refresh $view}.GetNewClosure()
     $refresh.Add_Click($view.RefreshAction)
     $openFile.Add_Click({
@@ -133,6 +157,7 @@ function New-GuardLibraryView($Parent,$RootBox) {
 }
 
 function Stop-GuardPreview($View) {
+    if($View.FullScreen){& $View.RestoreFullScreen}
     $View.Timer.Stop()
     if($View.Player){$View.Player.Dispose();$View.Player=$null}
 }
