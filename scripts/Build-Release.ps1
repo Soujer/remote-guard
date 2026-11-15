@@ -1,15 +1,18 @@
 ﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.3.0',
-    [string]$OutputDirectory
+    [string]$Version = '1.3.2',
+    [string]$OutputDirectory,
+    [string]$EncoderDirectory
 )
 
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
+if (-not $EncoderDirectory) { $EncoderDirectory = Join-Path $repo 'release/recording-test-tools' }
 if (-not $OutputDirectory) { $OutputDirectory = Join-Path $repo 'release' }
 $OutputDirectory = [IO.Path]::GetFullPath($OutputDirectory)
 [void](New-Item -ItemType Directory -Path $OutputDirectory -Force)
-$windowsZip = Join-Path $OutputDirectory ('remote-guard-windows-v' + $Version + '.zip')
+# Old updaters first select v1.3.1, which understands bundled packages and their limits.
+$windowsZip = Join-Path $OutputDirectory ('remote-guard-windows-bundled-v' + $Version + '.zip')
 $macosTar = Join-Path $OutputDirectory ('remote-guard-macos-v' + $Version + '.tar.gz')
 $checksums = Join-Path $OutputDirectory ('SHA256SUMS-v' + $Version + '.txt')
 foreach ($path in @($windowsZip, $macosTar, $checksums)) {
@@ -21,6 +24,11 @@ if (@(& git -C $repo status --porcelain --untracked-files=no).Count -gt 0) {
     throw 'Commit tracked source changes before building a release'
 }
 Import-Module ps2exe -ErrorAction Stop
+foreach ($name in @('ffmpeg.exe','LICENSE','SOURCE.txt')) {
+    if (-not (Test-Path -LiteralPath (Join-Path $EncoderDirectory $name) -PathType Leaf)) { throw ('Missing offline encoder input: ' + $name) }
+}
+$codecHash=(Get-FileHash -LiteralPath (Join-Path $EncoderDirectory 'ffmpeg.exe') -Algorithm SHA256).Hash
+if ($codecHash -ne '3256173F3F8BFFD7DF12227C68ADF68025EDB1832273A9530688A7BB1ED8EDEC') { throw 'Encoder differs from the pinned FFmpeg 9.0.2 build' }
 $staging = Join-Path $OutputDirectory ('.build-v' + $Version + '-' + [guid]::NewGuid().ToString('N'))
 $windows = Join-Path $staging 'remote-guard-windows'
 $macos = Join-Path $staging 'remote-guard-macos'
@@ -47,7 +55,15 @@ $injection = '$script:GuardBuildVersion = ''' + $Version + '''' + "`r`n" + '$scr
 $compiledSource = Join-Path $staging 'compiled-main.ps1'
 [IO.File]::WriteAllText($compiledSource, $source.Replace('# BUILD_PAYLOAD', $injection), [Text.UTF8Encoding]::new($true))
 $exe = Join-Path $windows 'remote-guard.exe'
-Invoke-PS2EXE -inputFile $compiledSource -outputFile $exe -noConsole -STA -version ($Version + '.0') -title 'remote-guard' -product 'remote-guard' -description 'Remote Guard desktop'
+$encoderBundle=Join-Path $staging 'encoder.zip'
+$encoderInput=Join-Path $staging 'encoder-input';[void][IO.Directory]::CreateDirectory($encoderInput)
+foreach($name in @('ffmpeg.exe','LICENSE','SOURCE.txt')){Copy-Item -LiteralPath (Join-Path $EncoderDirectory $name) -Destination (Join-Path $encoderInput $name)}
+$sourceInfo="`r`nBundled FFmpeg 9.0.2 (GPLv3), unmodified Gyan essentials executable.`r`nCorresponding source: https://github.com/FFmpeg/FFmpeg/commit/946fcce07b`r`nSource archive: https://github.com/FFmpeg/FFmpeg/archive/946fcce07b.tar.gz`r`nBuild and dependency information: https://www.gyan.dev/ffmpeg/builds/`r`nFFmpeg executable SHA256="+$codecHash+"`r`n"
+[IO.File]::AppendAllText((Join-Path $encoderInput 'SOURCE.txt'),$sourceInfo,[Text.UTF8Encoding]::new($false))
+$encoderFiles=@('ffmpeg.exe','LICENSE','SOURCE.txt') | ForEach-Object { Join-Path $encoderInput $_ }
+Compress-Archive -LiteralPath $encoderFiles -DestinationPath $encoderBundle -CompressionLevel Optimal
+$bundleTarget='%LOCALAPPDATA%\RemoteGuard\payload\'+$Version+'-'+$commit+'\encoder.zip'
+Invoke-PS2EXE -inputFile $compiledSource -outputFile $exe -noConsole -STA -x64 -version ($Version + '.0') -title 'remote-guard' -product 'remote-guard' -description 'Remote Guard desktop with offline recording' -embedFiles @{$bundleTarget=$encoderBundle}
 Copy-Item -LiteralPath $exe -Destination (Join-Path $windows 'remote-guard-setup.exe')
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Installer compilation failed' }
 $binary = [IO.File]::ReadAllBytes($exe)
@@ -59,6 +75,7 @@ foreach ($name in $windowsFiles) {
     }
 }
 Compress-Archive -Path (Join-Path $windows '*') -DestinationPath $windowsZip -CompressionLevel Optimal
+if ((Get-Item -LiteralPath $exe).Length -gt 64MB -or (Get-Item -LiteralPath $windowsZip).Length -gt 100MB) { throw 'Bundled release exceeds updater or release-asset size limits' }
 & tar.exe -czf $macosTar -C $staging 'remote-guard-macos'
 if ($LASTEXITCODE -ne 0) { throw 'macOS archive creation failed' }
 $standalone = Join-Path $OutputDirectory ('remote-guard-v' + $Version + '.exe')

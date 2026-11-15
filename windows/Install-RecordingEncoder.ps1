@@ -1,27 +1,48 @@
-﻿param([Parameter(Mandatory=$true)][string]$Directory)
+﻿param(
+    [Parameter(Mandatory=$true)][string]$Directory,
+    [string]$BundlePath = (Join-Path $PSScriptRoot 'encoder.zip')
+)
 $ErrorActionPreference = 'Stop'
-# Download on demand rather than adding a large third-party binary to every release.
-$base = 'https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip'
-$temp = Join-Path ([IO.Path]::GetTempPath()) ('remote-guard-encoder-' + [guid]::NewGuid().ToString('N') + '.zip')
+# Pinned Gyan FFmpeg 9.0.2 essentials build. No network requests at runtime.
+$expected='3256173F3F8BFFD7DF12227C68ADF68025EDB1832273A9530688A7BB1ED8EDEC'
+function Encoder-Hash([string]$Path) {
+    $sha=[Security.Cryptography.SHA256]::Create();$stream=[IO.File]::OpenRead($Path)
+    try{[BitConverter]::ToString($sha.ComputeHash($stream)).Replace('-','')}finally{$stream.Dispose();$sha.Dispose()}
+}
+$target=Join-Path $Directory 'ffmpeg.exe'
+if((Test-Path -LiteralPath $target -PathType Leaf) -and (Encoder-Hash $target) -eq $expected){return $target}
+if(-not(Test-Path -LiteralPath $BundlePath -PathType Leaf)) {
+    # Compatibility scripts in an installed ZIP can ask the bundled application to release its codec.
+    $app=Join-Path (Split-Path $Directory -Parent) 'remote-guard.exe'
+    if(Test-Path -LiteralPath $app -PathType Leaf){
+        $process=Start-Process -FilePath $app -ArgumentList ('-InstallEncoder -InstallRoot "'+(Split-Path $Directory -Parent)+'"') -WindowStyle Hidden -Wait -PassThru
+        if($process.ExitCode -eq 0 -and (Test-Path -LiteralPath $target) -and (Encoder-Hash $target) -eq $expected){return $target}
+    }
+    throw '内置组件资源缺失，请重新打开最新版 remote-guard.exe 释放组件'
+}
+Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
+$archive=[IO.Compression.ZipFile]::OpenRead($BundlePath)
+$staging=$null
 try {
-    [Net.ServicePointManager]::SecurityProtocol = [Net.ServicePointManager]::SecurityProtocol -bor [Net.SecurityProtocolType]::Tls12
-    $checksum = [string](Invoke-WebRequest -Uri ($base + '.sha256') -UseBasicParsing -TimeoutSec 30).Content
-    if ($checksum -notmatch '^\s*([a-fA-F0-9]{64})(\s|$)') { throw '下载源未提供有效的 SHA-256 校验值' }
-    $expected = $Matches[1]
-    Invoke-WebRequest -Uri $base -OutFile $temp -UseBasicParsing -TimeoutSec 600
-    $hasher=[Security.Cryptography.SHA256]::Create();$stream=[IO.File]::OpenRead($temp)
-    try{$actual=[BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-','')}finally{$stream.Dispose();$hasher.Dispose()}
-    if ($actual -ine $expected) { throw 'FFmpeg 下载校验失败，请重试' }
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    $allowed=@('ffmpeg.exe','LICENSE','SOURCE.txt');$seen=@{};$total=[long]0
+    foreach($entry in $archive.Entries){
+        if($allowed -cnotcontains $entry.FullName -or $seen.ContainsKey($entry.FullName)){throw '内置组件包含重复文件或不安全路径'}
+        $seen[$entry.FullName]=$true;$total+=$entry.Length
+        if($entry.Length -gt 128MB -or ($entry.FullName -ne 'ffmpeg.exe' -and $entry.Length -gt 1MB) -or $total -gt 130MB){throw '内置组件大小异常'}
+    }
+    foreach($name in $allowed){if(-not $seen.ContainsKey($name)){throw ('内置组件缺少文件: '+$name)}}
     [void][IO.Directory]::CreateDirectory($Directory)
-    $zip = [IO.Compression.ZipFile]::OpenRead($temp)
-    try {
-        foreach ($name in @('ffmpeg.exe','ffplay.exe','LICENSE')) {
-            $entries = @($zip.Entries | Where-Object { $_.FullName -match ('(^|/)' + [regex]::Escape($name) + '$') })
-            if ($entries.Count -ne 1) { throw ('下载包中缺少或存在重复文件: ' + $name) }
-            [IO.Compression.ZipFileExtensions]::ExtractToFile($entries[0], (Join-Path $Directory $name), $true)
-        }
-    } finally { $zip.Dispose() }
-    [IO.File]::WriteAllText((Join-Path $Directory 'SOURCE.txt'), ($base + "`r`nSHA256=" + $expected + "`r`nGPL FFmpeg build; sources and license: https://www.gyan.dev/ffmpeg/builds/"))
-    return (Join-Path $Directory 'ffmpeg.exe')
-} finally { Remove-Item -LiteralPath $temp -ErrorAction SilentlyContinue }
+    $staging=Join-Path $Directory ('.encoder-'+[guid]::NewGuid().ToString('N'))
+    [void][IO.Directory]::CreateDirectory($staging)
+    foreach($entry in $archive.Entries){[IO.Compression.ZipFileExtensions]::ExtractToFile($entry,(Join-Path $staging $entry.FullName),$false)}
+    if((Encoder-Hash (Join-Path $staging 'ffmpeg.exe')) -ne $expected){throw '内置录屏组件 SHA-256 校验失败'}
+    # A failed extraction or validation cannot replace an existing encoder.
+    foreach($name in $allowed){Move-Item -LiteralPath (Join-Path $staging $name) -Destination (Join-Path $Directory $name) -Force}
+    return $target
+}finally {
+    $archive.Dispose()
+    if($staging){
+        foreach($name in @('ffmpeg.exe','LICENSE','SOURCE.txt')){Remove-Item -LiteralPath (Join-Path $staging $name) -ErrorAction SilentlyContinue}
+        Remove-Item -LiteralPath $staging -ErrorAction SilentlyContinue
+    }
+}

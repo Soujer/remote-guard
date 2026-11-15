@@ -14,11 +14,14 @@
         if($cfg.ffmpeg){$View.Encoder.Text=$cfg.ffmpeg}
         if($cfg.maxStorageMB){$View.Quota.Value=[decimal]$cfg.maxStorageMB}
     }
-    $View.Status.Text='默认本机保存，每 5 分钟约 15 MB；总量 2 GB 后删除最旧片段。'
+    try {
+        [void](& (Join-Path $View.Resources 'Install-RecordingEncoder.ps1') -Directory (Join-Path $directory 'ffmpeg'))
+        $View.Status.Text='内置录屏组件已就绪，无需下载。每 5 分钟约 15 MB，总量默认 2 GB。'
+    }catch{$View.Status.Text='内置组件释放失败: '+$_.Exception.Message}
 }
 
 function New-GuardRecordingView($Parent,$RootBox,[string]$Resources) {
-    $view=[pscustomobject]@{Root=$RootBox;Resources=$Resources;Path='';Config=$null;Enabled=$null;Folder=$null;Encoder=$null;Quota=$null;Password=$null;Confirm=$null;Status=$null}
+    $view=[pscustomobject]@{Root=$RootBox;Resources=$Resources;Path='';Config=$null;Enabled=$null;Folder=$null;Encoder=$null;Quota=$null;Password=$null;Confirm=$null;Status=$null;SaveAction=$null}
     function Recording-Label([string]$Text,[int]$Y) {
         $label=New-Object Windows.Forms.Label;$label.Text=$Text;$label.SetBounds(25,$Y,760,25);$Parent.Controls.Add($label)
     }
@@ -26,13 +29,14 @@ function New-GuardRecordingView($Parent,$RootBox,[string]$Resources) {
     Recording-Label '录像保存目录' 65
     $view.Folder=New-Object Windows.Forms.TextBox;$view.Folder.SetBounds(25,95,630,27);$Parent.Controls.Add($view.Folder)
     $browse=New-Object Windows.Forms.Button;$browse.Text='浏览';$browse.SetBounds(670,92,110,32);$Parent.Controls.Add($browse)
-    Recording-Label '录屏组件（首次可自动下载，也可选择已有程序）' 140
+    Recording-Label '内置录屏组件（无需下载，也可选择已有程序）' 140
     $view.Encoder=New-Object Windows.Forms.TextBox;$view.Encoder.SetBounds(25,170,500,27);$Parent.Controls.Add($view.Encoder)
     $choose=New-Object Windows.Forms.Button;$choose.Text='选择';$choose.SetBounds(540,167,110,32);$Parent.Controls.Add($choose)
-    $download=New-Object Windows.Forms.Button;$download.Text='下载组件';$download.SetBounds(670,167,110,32);$Parent.Controls.Add($download)
+    $download=New-Object Windows.Forms.Button;$download.Text='释放组件';$download.SetBounds(670,167,110,32);$Parent.Controls.Add($download)
     Recording-Label '存储上限（MB） · 达到上限会自动删除最旧片段' 215
     $view.Quota=New-Object Windows.Forms.NumericUpDown;$view.Quota.SetBounds(25,245,170,27);$view.Quota.Minimum=128;$view.Quota.Maximum=1048576;$Parent.Controls.Add($view.Quota)
-    Recording-Label '首次启用：设置私钥密码与确认密码（至少 12 位）；已有密钥时留空即可' 290
+    $passwordLabel=New-Object Windows.Forms.Label;$passwordLabel.Text='私钥密码（至少 12 位；已有密钥可留空）';$passwordLabel.SetBounds(25,290,380,25);$Parent.Controls.Add($passwordLabel)
+    $confirmLabel=New-Object Windows.Forms.Label;$confirmLabel.Text='再次输入密码（确认）';$confirmLabel.SetBounds(410,290,370,25);$Parent.Controls.Add($confirmLabel)
     $view.Password=New-Object Windows.Forms.TextBox;$view.Password.UseSystemPasswordChar=$true;$view.Password.SetBounds(25,320,365,27);$Parent.Controls.Add($view.Password)
     $view.Confirm=New-Object Windows.Forms.TextBox;$view.Confirm.UseSystemPasswordChar=$true;$view.Confirm.SetBounds(410,320,370,27);$Parent.Controls.Add($view.Confirm)
     Recording-Label '播放需要私钥文件与密码，丢失后无法恢复。请将私钥另行备份。' 365
@@ -43,20 +47,21 @@ function New-GuardRecordingView($Parent,$RootBox,[string]$Resources) {
     $choose.Add_Click({$d=New-Object Windows.Forms.OpenFileDialog;$d.Filter='ffmpeg.exe|ffmpeg.exe';try{if($d.ShowDialog() -eq 'OK'){$view.Encoder.Text=$d.FileName}}finally{$d.Dispose()}}.GetNewClosure())
     $download.Add_Click({
         $download.Enabled=$false
-        try{$view.Status.Text='正在下载并校验录屏组件，约 110 MB……';$view.Status.Refresh();$view.Encoder.Text=& (Join-Path $view.Resources 'Install-RecordingEncoder.ps1') -Directory (Join-Path $view.Root.Text 'ffmpeg');$view.Status.Text='组件已安装。'}catch{$view.Status.Text='下载失败: '+$_.Exception.Message}finally{$download.Enabled=$true}
+        try{$view.Status.Text='正在释放并校验内置组件……';$view.Status.Refresh();$view.Encoder.Text=& (Join-Path $view.Resources 'Install-RecordingEncoder.ps1') -Directory (Join-Path $view.Root.Text 'ffmpeg');$view.Status.Text='内置组件已就绪，无需下载。'}catch{$view.Status.Text='组件释放失败: '+$_.Exception.Message}finally{$download.Enabled=$true}
     }.GetNewClosure())
-    $save.Add_Click({
+    $view.SaveAction={
         try {
             if($view.Path -ne $view.Root.Text){throw '安装目录已更改，请重新进入录屏页面后填写'}
             $directory=$view.Root.Text;[void][IO.Directory]::CreateDirectory($directory);$path=Join-Path $directory 'recording.json'
             if(-not $view.Enabled.Checked){
                 $cfg=$view.Config;if(-not $cfg){$cfg=[pscustomobject]@{schema=1;enabled=$false}};$cfg.enabled=$false
             }else{
-                if(-not(Test-Path -LiteralPath $view.Encoder.Text -PathType Leaf)){throw '请先下载或选择录屏组件'}
+                if(-not(Test-Path -LiteralPath $view.Encoder.Text -PathType Leaf)){throw '请先释放内置组件或选择已有录屏组件'}
                 if($view.Folder.Text -notmatch '^[A-Za-z]:\\'){throw '请选择本机磁盘上的绝对路径'}
                 $public=$null;if($view.Config){$public=$view.Config.publicKey}
                 if(-not $public){
-                    if($view.Password.Text.Length -lt 12 -or $view.Password.Text -cne $view.Confirm.Text){throw '请填写并确认至少 12 位密码'}
+                    $passwordError=[RemoteGuard.Vault]::PasswordError($view.Password.Text,$view.Confirm.Text)
+                    if($passwordError){throw $passwordError}
                     $d=New-Object Windows.Forms.SaveFileDialog;$d.Filter='播放私钥 (*.rgkey)|*.rgkey';$d.FileName='remote-guard-playback.rgkey';$d.Title='保存播放私钥'
                     try{if($d.ShowDialog() -ne 'OK'){return};if(Test-Path -LiteralPath $d.FileName){throw '不能覆盖已有私钥'};$public=[RemoteGuard.Vault]::CreateKey($d.FileName,$view.Password.Text)}finally{$d.Dispose()}
                     $view.Config=[pscustomobject]@{publicKey=$public;enabled=$false}
@@ -67,7 +72,8 @@ function New-GuardRecordingView($Parent,$RootBox,[string]$Resources) {
             Move-Item -LiteralPath ($path+'.tmp') -Destination $path -Force
             $view.Config=$cfg;$view.Password.Clear();$view.Confirm.Clear();$view.Status.Text='录屏设置已保存。'
         }catch{$view.Status.Text='保存失败: '+$_.Exception.Message}
-    }.GetNewClosure())
+    }.GetNewClosure()
+    $save.Add_Click($view.SaveAction)
     Load-GuardRecordingView $view
     return $view
 }
@@ -104,7 +110,7 @@ function New-GuardLibraryView($Parent,$RootBox) {
             $encoder=Join-Path $view.Root.Text 'ffmpeg\ffmpeg.exe'
             $configPath=Join-Path $view.Root.Text 'recording.json'
             if(Test-Path -LiteralPath $configPath){$cfg=Get-Content -LiteralPath $configPath -Raw -Encoding UTF8 | ConvertFrom-Json;if($cfg.ffmpeg){$encoder=$cfg.ffmpeg}}
-            if(-not(Test-Path -LiteralPath $encoder)){throw '请先在录屏页面下载录屏组件（无需启用录屏即可播放）'}
+            if(-not(Test-Path -LiteralPath $encoder)){throw '请先在录屏页面释放内置组件（无需启用录屏即可播放）'}
             $view.Player=[RemoteGuard.Preview]::new([string]$view.List.SelectedItems[0].Tag,$view.Key.Text,$view.Password.Text,$encoder)
             $view.Password.Clear();$view.Status.Text='正在验证并解锁录像……';$view.Timer.Start()
         }catch{$view.Password.Clear();$view.Status.Text='播放失败: '+$_.Exception.Message}

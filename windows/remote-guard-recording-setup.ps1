@@ -14,13 +14,13 @@ $enabled.Checked = $true; $form.Controls.Add($enabled)
 Add-RecordingLabel '录像目录' 55
 $folder = New-Object Windows.Forms.TextBox; $folder.SetBounds(20,80,525,25); $folder.Text = Join-Path $Directory 'recordings'; $form.Controls.Add($folder)
 $browse = New-Object Windows.Forms.Button; $browse.Text = '浏览'; $browse.SetBounds(555,78,85,28); $form.Controls.Add($browse)
-Add-RecordingLabel 'FFmpeg 程序（可选择现有 ffmpeg.exe，或下载并校验）' 115
+Add-RecordingLabel '内置录屏组件（无需下载，也可选择现有 ffmpeg.exe）' 115
 $encoder = New-Object Windows.Forms.TextBox; $encoder.SetBounds(20,140,430,25); $encoder.Text = Join-Path $Directory 'ffmpeg\ffmpeg.exe'; $form.Controls.Add($encoder)
 $select = New-Object Windows.Forms.Button; $select.Text = '选择'; $select.SetBounds(460,138,80,28); $form.Controls.Add($select)
-$download = New-Object Windows.Forms.Button; $download.Text = '下载'; $download.SetBounds(550,138,90,28); $form.Controls.Add($download)
+$download = New-Object Windows.Forms.Button; $download.Text = '释放组件'; $download.SetBounds(550,138,90,28); $form.Controls.Add($download)
 Add-RecordingLabel '总存储上限（MB），达到上限自动删除最旧片段' 175
 $quota = New-Object Windows.Forms.NumericUpDown; $quota.SetBounds(20,200,150,25); $quota.Minimum = 128; $quota.Maximum = 1048576; $quota.Value = 2048; $form.Controls.Add($quota)
-Add-RecordingLabel '首次启用需创建播放私钥，设置至少 12 位密码（已有公钥时可留空）' 235
+Add-RecordingLabel '私钥密码（左侧，至少 12 位）             再次输入密码（右侧确认）' 235
 $password = New-Object Windows.Forms.TextBox; $password.SetBounds(20,260,300,25); $password.UseSystemPasswordChar = $true; $form.Controls.Add($password)
 $confirm = New-Object Windows.Forms.TextBox; $confirm.SetBounds(335,260,305,25); $confirm.UseSystemPasswordChar = $true; $form.Controls.Add($confirm)
 Add-RecordingLabel '左侧密码，右侧确认。私钥和密码丢失后无法恢复录像，请另行备份。' 295
@@ -52,10 +52,10 @@ $select.Add_Click({
 $download.Add_Click({
     $download.Enabled = $false
     try {
-        $status.Text = '正在下载并校验 FFmpeg，约 110 MB，请稍候……'; $form.Refresh()
+        $status.Text = '正在释放并校验内置组件……'; $form.Refresh()
         $encoder.Text = & (Join-Path $PSScriptRoot 'Install-RecordingEncoder.ps1') -Directory (Join-Path $Directory 'ffmpeg')
-        $status.Text = 'FFmpeg 已下载并通过 SHA-256 校验。'
-    } catch { $status.Text = '下载失败: ' + $_.Exception.Message }
+        $status.Text = '内置组件已就绪，无需下载。'
+    } catch { $status.Text = '组件释放失败: ' + $_.Exception.Message }
     finally { $download.Enabled = $true }
 })
 $save.Add_Click({
@@ -68,12 +68,15 @@ $save.Add_Click({
             Move-Item -LiteralPath ($configPath + '.tmp') -Destination $configPath -Force
             $status.Text = '自动录屏已关闭，正在录制的片段将保存后停止。'; return
         }
-        if (-not (Test-Path -LiteralPath $encoder.Text -PathType Leaf)) { throw '请先选择或下载 FFmpeg' }
+        if (-not (Test-Path -LiteralPath $encoder.Text -PathType Leaf)) {
+            $encoder.Text = & (Join-Path $PSScriptRoot 'Install-RecordingEncoder.ps1') -Directory (Join-Path $Directory 'ffmpeg')
+        }
         if ($folder.Text -notmatch '^[A-Za-z]:\\') { throw '请选择本机磁盘上的绝对路径' }
         $publicKey = $null
         if ($script:recordingConfig) { $publicKey = $script:recordingConfig.publicKey }
         if (-not $publicKey) {
-            if ($password.Text.Length -lt 12 -or $password.Text -cne $confirm.Text) { throw '请填写并确认至少 12 位的私钥密码' }
+            $passwordError = [RemoteGuard.Vault]::PasswordError($password.Text,$confirm.Text)
+            if ($passwordError) { throw $passwordError }
             $dialog = New-Object Windows.Forms.SaveFileDialog
             $dialog.Title = '保存播放私钥（请备份到安全位置）'; $dialog.Filter = '播放私钥 (*.rgkey)|*.rgkey'; $dialog.FileName = 'remote-guard-playback.rgkey'
             try {

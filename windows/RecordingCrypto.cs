@@ -11,6 +11,13 @@ namespace RemoteGuard {
     // v1: magic(8), wrapped-key length(4 LE), RSA-OAEP-SHA256(AES key || MAC key),
     // IV(16), AES-256-CBC ciphertext, HMAC-SHA256(header || ciphertext).
     public static class Vault {
+        public static string PasswordError(string password, string confirmation) {
+            if (String.IsNullOrEmpty(password)) return "请输入私钥密码（至少 12 位）";
+            if (password.Length < 12) return "私钥密码不足 12 位，当前为 " + password.Length + " 位";
+            if (String.IsNullOrEmpty(confirmation)) return "请在右侧确认密码框再次输入密码";
+            if (!String.Equals(password, confirmation, StringComparison.Ordinal)) return "两次输入的密码不一致，请重新确认";
+            return null;
+        }
         internal static byte[] Random(int size) {
             byte[] bytes = new byte[size];
             using (var rng = RandomNumberGenerator.Create()) rng.GetBytes(bytes);

@@ -23,8 +23,15 @@ try {
         [void][Management.Automation.Language.Parser]::ParseFile($script.FullName,[ref]$tokens,[ref]$errors)
         Assert ($errors.Count -eq 0) ('PowerShell parse failed: ' + $script.Name)
     }
+    Assert ([RemoteGuard.Vault]::PasswordError('123456789012','123456789012') -eq $null) 'Exactly 12 matching password characters must be accepted'
+    Assert ([RemoteGuard.Vault]::PasswordError('一二三四五六七八九十甲乙','一二三四五六七八九十甲乙') -eq $null) 'Twelve matching Chinese characters must be accepted'
+    Assert ([RemoteGuard.Vault]::PasswordError(' Abcdef1234 ',' Abcdef1234 ') -eq $null) 'Do not silently trim password whitespace'
+    Assert ([RemoteGuard.Vault]::PasswordError('12345678901','12345678901') -like '*不足 12*11*') 'A truly short password must report its length'
+    Assert ([RemoteGuard.Vault]::PasswordError('123456789012','') -like '*确认密码*') 'Missing confirmation must request confirmation rather than claim a short password'
+    Assert ([RemoteGuard.Vault]::PasswordError('123456789012','123456789013') -like '*不一致*') 'Mismatched passwords must report mismatch rather than length'
+    Assert ([RemoteGuard.Vault]::PasswordError('Abcdef123456','abcdef123456') -like '*不一致*') 'Password comparison must be case sensitive'
     $key = Join-Path $scratch 'test.rgkey'
-    $password = 'test-only strong password 847'
+    $password = 'Test12345678'
     $publicKey = [RemoteGuard.Vault]::CreateKey($key,$password)
     Assert ($publicKey -notmatch '<(D|P|Q)>') 'Recording configuration must contain only a public key'
     Assert ([IO.File]::ReadAllText($key) -notmatch 'RSAKeyValue') 'Playback private key must be password encrypted'

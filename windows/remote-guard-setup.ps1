@@ -9,14 +9,14 @@
 #   5) 一键部署：复制守护脚本 + 注册每分钟计划任务 + 拉起即时监控进程
 #
 # 打包：scripts/Build-Release.ps1（内置资源，无需管理员权限）
-param([string]$InstallRoot,[switch]$SmokeTest)
+param([string]$InstallRoot,[switch]$SmokeTest,[switch]$InstallEncoder)
 # BUILD_PAYLOAD
 $ErrorActionPreference='Stop'
 trap {
     if($SmokeTest -and $InstallRoot){[void][IO.Directory]::CreateDirectory($InstallRoot);[IO.File]::WriteAllText((Join-Path $InstallRoot 'desktop-smoke-error.txt'),$_.ToString());exit 1}
     throw $_
 }
-if(-not $script:GuardBuildVersion){$script:GuardBuildVersion='1.3.0'}
+if(-not $script:GuardBuildVersion){$script:GuardBuildVersion='1.3.2'}
 # ============================================================
 
 Import-Module ScheduledTasks, CimCmdlets -ErrorAction Stop -WarningAction SilentlyContinue
@@ -70,6 +70,10 @@ if (-not $InstallRoot) {
     if (-not $InstallRoot) { $InstallRoot = Join-Path $env:LOCALAPPDATA 'RemoteGuard\app' }
 }
 if (Test-Path -LiteralPath (Join-Path $InstallRoot 'updating.flag')) { exit }
+if($InstallEncoder){
+    [void](& (Join-Path $SetupDir 'Install-RecordingEncoder.ps1') -Directory (Join-Path $InstallRoot 'ffmpeg'))
+    return
+}
 
 # ---------- 布局 ----------
 $form                = New-Object System.Windows.Forms.Form
@@ -539,7 +543,17 @@ if($SmokeTest){
     foreach($requiredCommand in @('Get-GuardFileHash','Get-ScheduledTask','Register-ScheduledTask','Get-CimInstance')){if(-not(Get-Command $requiredCommand -ErrorAction SilentlyContinue)){throw ('Missing runtime command: '+$requiredCommand)}}
     & $libraryView.RefreshAction
     & $libraryView.StopAction
-    $result=[pscustomobject]@{Tabs=@($tabs.TabPages|ForEach-Object Text);RecordingEmbedded=($recordingView.Enabled.Parent -eq $tabRecording);PlayerEmbedded=($libraryView.Picture.Parent -eq $tabLibrary);UpdaterPresent=($checkUpdate.Parent -eq $tabUpdate)}|ConvertTo-Json
+    if($script:GuardEmbeddedPayload -and -not(Test-Path -LiteralPath $recordingView.Encoder.Text -PathType Leaf)){throw $recordingView.Status.Text}
+    if(-not $recordingView.Config){
+        $recordingView.Enabled.Checked=$true;$recordingView.Password.Text='Test12345678';$recordingView.Confirm.Clear()
+        & $recordingView.SaveAction
+        if($recordingView.Status.Text -notlike '*确认密码*' -or $recordingView.Status.Text -like '*不足*'){throw 'Missing confirmation must have a distinct UI error'}
+        $recordingView.Confirm.Text='Different123'
+        & $recordingView.SaveAction
+        if($recordingView.Status.Text -notlike '*不一致*'){throw 'Password mismatch must have a distinct UI error'}
+        $recordingView.Enabled.Checked=$false;$recordingView.Password.Clear();$recordingView.Confirm.Clear()
+    }
+    $result=[pscustomobject]@{Tabs=@($tabs.TabPages|ForEach-Object Text);RecordingEmbedded=($recordingView.Enabled.Parent -eq $tabRecording);PlayerEmbedded=($libraryView.Picture.Parent -eq $tabLibrary);UpdaterPresent=($checkUpdate.Parent -eq $tabUpdate);EncoderReady=(Test-Path -LiteralPath $recordingView.Encoder.Text -PathType Leaf)}|ConvertTo-Json
     if($script:GuardEmbeddedPayload){[void][IO.Directory]::CreateDirectory($InstallRoot);[IO.File]::WriteAllText((Join-Path $InstallRoot 'desktop-smoke.json'),$result)}else{Write-Output $result}
     $form.Dispose();$statusTimer.Dispose();$libraryView.Timer.Dispose();return
 }
