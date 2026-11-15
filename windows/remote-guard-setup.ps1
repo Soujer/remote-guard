@@ -19,6 +19,9 @@ trap {
 if(-not $script:GuardBuildVersion){$script:GuardBuildVersion='1.3.0'}
 # ============================================================
 
+# ps2exe preloads utility cmdlets but does not always import the module's script functions.
+Import-Module Microsoft.PowerShell.Utility -Force -ErrorAction Stop
+Import-Module ScheduledTasks, CimCmdlets -ErrorAction Stop
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -531,6 +534,7 @@ $form.Add_FormClosed({
     }
 })
 if($SmokeTest){
+    foreach($requiredCommand in @('Get-FileHash','Get-ScheduledTask','Register-ScheduledTask','Get-CimInstance')){if(-not(Get-Command $requiredCommand -ErrorAction SilentlyContinue)){throw ('Missing runtime command: '+$requiredCommand)}}
     & $libraryView.RefreshAction
     & $libraryView.StopAction
     $result=[pscustomobject]@{Tabs=@($tabs.TabPages|ForEach-Object Text);RecordingEmbedded=($recordingView.Enabled.Parent -eq $tabRecording);PlayerEmbedded=($libraryView.Picture.Parent -eq $tabLibrary);UpdaterPresent=($checkUpdate.Parent -eq $tabUpdate)}|ConvertTo-Json
