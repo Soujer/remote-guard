@@ -14,6 +14,7 @@ try {
     Add-Type -Path (Join-Path $recordRoot 'RecordingCrypto.cs')
     Write-RecordingLog '录屏进程就绪'
     while (Get-GuardRecordingSession $recordRoot) {
+        if (Test-Path -LiteralPath (Join-Path $recordRoot 'recording.stop')) { break }
         $cfg = Get-GuardRecordingConfig $recordRoot
         if (-not $cfg) { break }
         [void][IO.Directory]::CreateDirectory($cfg.directory)
@@ -28,6 +29,7 @@ try {
         Write-RecordingLog ('开始加密片段: ' + $name)
         while (-not $capture.Done) {
             Start-Sleep -Seconds 2
+            if (Test-Path -LiteralPath (Join-Path $recordRoot 'recording.stop')) { break }
             $current = Get-GuardRecordingConfig $recordRoot
             if (-not $current -or -not (Get-GuardRecordingSession $recordRoot)) { break }
             # Configuration changes take effect at the next segment boundary.

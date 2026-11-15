@@ -73,6 +73,7 @@ function Limit-GuardRecordingStorage($Config, [long]$ReserveBytes) {
 
 function Start-GuardRecording([string]$Directory, [bool]$Active) {
     if (-not $Active) { return }
+    if (Test-Path -LiteralPath (Join-Path $Directory 'recording.stop')) { return }
     try {
         $cfg = Get-GuardRecordingConfig $Directory
         if (-not $cfg) { return }

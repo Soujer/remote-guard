@@ -17,3 +17,7 @@ recording-retry.json
 *.rgrec.partial
 recordings/
 ffmpeg/
+updates.json
+recording.stop
+updating.flag
+update-cache/

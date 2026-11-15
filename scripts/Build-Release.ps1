@@ -1,6 +1,6 @@
 ﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.2.0',
+    [string]$Version = '1.3.0',
     [string]$OutputDirectory
 )
 
@@ -25,7 +25,7 @@ $staging = Join-Path $OutputDirectory ('.build-v' + $Version + '-' + [guid]::New
 $windows = Join-Path $staging 'remote-guard-windows'
 $macos = Join-Path $staging 'remote-guard-macos'
 [void](New-Item -ItemType Directory -Path $windows, $macos)
-$windowsFiles = @('remote-guard.ps1', 'remote-guard-instant.ps1', 'remote-guard-setup.ps1', 'remote-guard-launcher.vbs', 'remote-guard-instant-launcher.vbs', 'recording-common.ps1', 'RecordingCrypto.cs', 'remote-guard-recorder.ps1', 'remote-guard-recording-setup.ps1', 'remote-guard-play.ps1', 'Install-RecordingEncoder.ps1')
+$windowsFiles = @('remote-guard.ps1', 'remote-guard-instant.ps1', 'remote-guard-setup.ps1', 'remote-guard-launcher.vbs', 'remote-guard-instant-launcher.vbs', 'recording-common.ps1', 'RecordingCrypto.cs', 'DesktopRuntime.cs', 'recording-ui.ps1', 'update-common.ps1', 'remote-guard-update.ps1', 'remote-guard-recorder.ps1', 'remote-guard-recording-setup.ps1', 'remote-guard-play.ps1', 'Install-RecordingEncoder.ps1')
 foreach ($name in $windowsFiles) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $repo 'windows') $name) -Destination (Join-Path $windows $name)
 }
@@ -39,8 +39,16 @@ foreach ($directory in @($windows, $macos)) {
     }
     [IO.File]::WriteAllText((Join-Path $directory 'VERSION'), ('version=' + $Version + "`ncommit=" + $commit + "`n"), [Text.UTF8Encoding]::new($false))
 }
-$exe = Join-Path $windows 'remote-guard-setup.exe'
-Invoke-PS2EXE -inputFile (Join-Path $windows 'remote-guard-setup.ps1') -outputFile $exe -noConsole -requireAdmin -STA -version ($Version + '.0') -title 'remote-guard' -product 'remote-guard' -description 'Remote connection monitor setup'
+$payload = Join-Path $staging 'runtime.zip'
+Compress-Archive -Path (Join-Path $windows '*') -DestinationPath $payload -CompressionLevel Optimal
+$embedded = [Convert]::ToBase64String([IO.File]::ReadAllBytes($payload))
+$source = [IO.File]::ReadAllText((Join-Path $windows 'remote-guard-setup.ps1'))
+$injection = '$script:GuardBuildVersion = ''' + $Version + '''' + "`r`n" + '$script:GuardBuildCommit = ''' + $commit + '''' + "`r`n" + '$script:GuardEmbeddedPayload = ''' + $embedded + ''''
+$compiledSource = Join-Path $staging 'compiled-main.ps1'
+[IO.File]::WriteAllText($compiledSource, $source.Replace('# BUILD_PAYLOAD', $injection), [Text.UTF8Encoding]::new($true))
+$exe = Join-Path $windows 'remote-guard.exe'
+Invoke-PS2EXE -inputFile $compiledSource -outputFile $exe -noConsole -STA -version ($Version + '.0') -title 'remote-guard' -product 'remote-guard' -description 'Remote Guard desktop'
+Copy-Item -LiteralPath $exe -Destination (Join-Path $windows 'remote-guard-setup.exe')
 if (-not (Test-Path -LiteralPath $exe)) { throw 'Installer compilation failed' }
 $binary = [IO.File]::ReadAllBytes($exe)
 $peOffset = [BitConverter]::ToInt32($binary, 0x3c)
@@ -53,10 +61,13 @@ foreach ($name in $windowsFiles) {
 Compress-Archive -Path (Join-Path $windows '*') -DestinationPath $windowsZip -CompressionLevel Optimal
 & tar.exe -czf $macosTar -C $staging 'remote-guard-macos'
 if ($LASTEXITCODE -ne 0) { throw 'macOS archive creation failed' }
-$lines = foreach ($path in @($windowsZip, $macosTar)) {
+$standalone = Join-Path $OutputDirectory ('remote-guard-v' + $Version + '.exe')
+if (Test-Path -LiteralPath $standalone) { throw ('Output already exists: ' + $standalone) }
+Copy-Item -LiteralPath $exe -Destination $standalone
+$lines = foreach ($path in @($windowsZip, $macosTar, $standalone)) {
     (Get-FileHash -LiteralPath $path -Algorithm SHA256).Hash.ToLowerInvariant() + '  ' + [IO.Path]::GetFileName($path)
 }
 [IO.File]::WriteAllLines($checksums, $lines, [Text.UTF8Encoding]::new($false))
-foreach ($path in @($windowsZip, $macosTar, $checksums)) {
+foreach ($path in @($windowsZip, $macosTar, $standalone, $checksums)) {
     Get-Item -LiteralPath $path | Select-Object FullName, Length
 }
