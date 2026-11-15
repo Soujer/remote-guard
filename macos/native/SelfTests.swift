@@ -35,6 +35,26 @@ enum SelfTests {
         try check(tracker.update([], now: 110) == ["ToDesk"], "Retain sessions through a brief quiet interval")
         try check(tracker.update(nil, now: 400) == ["ToDesk"], "Collection failure must not mean disconnected")
         try check(tracker.update([], now: 581).isEmpty, "Disconnect after a valid quiet interval")
+        func release(_ number: String) -> [String: Any] {
+            let prefix = "https://gitee.com/Soujer/remote-guard/releases/download/v" + number + "/"
+            return ["tag_name": "v" + number, "assets": [["name": "remote-guard-macos-universal-v" + number + ".zip", "browser_download_url": prefix + "remote-guard-macos-universal-v" + number + ".zip"], ["name": "SHA256SUMS-macos-v" + number + ".txt", "browser_download_url": prefix + "SHA256SUMS-macos-v" + number + ".txt"]]]
+        }
+        try check(MacUpdates.select([release("1.9.0"), release("1.10.0")], current: "1.4.0")?.version == "1.10.0", "Select macOS updates using numeric versions")
+        try check(MacUpdates.select([release("1.3.3")], current: "1.4.0") == nil, "Never downgrade macOS")
+        var prerelease = release("9.0.0"); prerelease["prerelease"] = true
+        try check(MacUpdates.select([prerelease], current: "1.4.0") == nil, "Skip prereleases")
+        var incomplete = release("2.0.0"); incomplete["assets"] = []
+        try check(MacUpdates.select([incomplete], current: "1.4.0") == nil, "Skip incomplete uploads")
+        var foreign = release("2.0.0"), foreignAssets = foreign["assets"] as! [[String: String]]; foreignAssets[0]["browser_download_url"] = "https://example.com/foreign.zip"; foreign["assets"] = foreignAssets
+        try check(MacUpdates.select([foreign], current: "1.4.0") == nil, "Reject package URLs outside the fixed Gitee repository")
+        if let package = ProcessInfo.processInfo.environment["GUARD_PACKAGE"] {
+            let zip = URL(fileURLWithPath: package), bytes = try Data(contentsOf: zip)
+            try check(try SafeZIP.entries(bytes).count == SafeZIP.files.count, "Validate every signed app package entry")
+            let extracted = root.appendingPathComponent("update-extraction"); try ensureDirectory(extracted)
+            try SafeZIP.extract(bytes, zipURL: zip, directory: extracted)
+            let signed = try runTool("/usr/bin/codesign", ["--verify", "--deep", "--strict", extracted.appendingPathComponent("RemoteGuard.app").path])
+            try check(signed.code == 0, "A safely extracted universal app must preserve its signature")
+        }
         let fixtureURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GUARD_FIXTURE"] ?? "macos/Tests/windows-interop.json")
         if fm.fileExists(atPath: fixtureURL.path) {
             let fixture = try JSONSerialization.jsonObject(with: Data(contentsOf: fixtureURL)) as! [String: String]
@@ -55,6 +75,10 @@ enum SelfTests {
         let memory = MemoryMovie(video), image = AVAssetImageGenerator(asset: memory.asset)
         let frame = try image.copyCGImage(at: CMTime(seconds: 0.2, preferredTimescale: 600), actualTime: nil)
         try check(frame.width == 640 && frame.height == 360, "Decode an authenticated in-memory movie without a plaintext file")
+        _ = NSApplication.shared
+        let desktop = GuardDesktop(); desktop.buildWindow()
+        try check(desktop.tabs.numberOfTabViewItems == 5, "Build all five native desktop pages")
+        try check(desktop.playerView.showsFullScreenToggleButton, "Embedded macOS playback must provide a full-screen control")
         let output = ProcessInfo.processInfo.environment["GUARD_TEST_OUTPUT"].map { URL(fileURLWithPath: $0) }
         if let output {
             try ensureDirectory(output)

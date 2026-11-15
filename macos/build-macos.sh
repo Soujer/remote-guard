@@ -34,7 +34,7 @@ printf 'version=%s\ncommit=%s\n' "$version" "$(git rev-parse HEAD)" > "$app/Cont
 cp README.md LICENSE "$app/Contents/Resources/"
 codesign --force --sign - --identifier com.soujer.remote-guard "$app"
 codesign --verify --deep --strict "$app"
-lipo -verify_arch arm64 x86_64 "$app/Contents/MacOS/RemoteGuard"
+lipo "$app/Contents/MacOS/RemoteGuard" -verify_arch arm64 x86_64
 zip="$out/remote-guard-macos-universal-v${version}.zip"
 ditto -c -k --keepParent --norsrc "$app" "$zip"
 (cd "$out" && shasum -a 256 "$(basename "$zip")" > "SHA256SUMS-macos-v${version}.txt")

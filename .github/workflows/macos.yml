@@ -20,6 +20,7 @@ jobs:
       - name: Test native encryption, detection and memory-only video playback
         env:
           GUARD_TEST_OUTPUT: release/macos/tests
+          GUARD_PACKAGE: release/macos/remote-guard-macos-universal-v1.4.0.zip
         run: release/macos/RemoteGuard.app/Contents/MacOS/RemoteGuard --self-test
       - uses: actions/upload-artifact@v4
         with:
@@ -27,5 +28,4 @@ jobs:
           path: |
             release/macos/remote-guard-macos-universal-v1.4.0.zip
             release/macos/SHA256SUMS-macos-v1.4.0.txt
-            release/macos/tests/macOS-interop.json
             release/macos/tests/macos-interop.json

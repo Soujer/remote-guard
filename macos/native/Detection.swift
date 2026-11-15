@@ -88,8 +88,9 @@ enum LaunchAgent {
         let value: [String: Any] = ["Label": label, "ProgramArguments": [app.appendingPathComponent("Contents/MacOS/RemoteGuard").path, "--background"], "RunAtLoad": true, "KeepAlive": ["SuccessfulExit": false], "ProcessType": "Interactive", "LimitLoadToSessionType": "Aqua"]
         let data = try PropertyListSerialization.data(fromPropertyList: value, format: .xml, options: 0)
         try data.write(to: url, options: .atomic)
-        _ = try? runTool("/bin/launchctl", ["bootout", "gui/\(getuid())/" + label])
+        // Do not boot out this running application when changing its login preference.
+        if let loaded = try? runTool("/bin/launchctl", ["print", "gui/\(getuid())/" + label]), loaded.code == 0 { return }
         let result = try runTool("/bin/launchctl", ["bootstrap", "gui/\(getuid())", url.path]); try require(result.code == 0, "登录启动注册失败")
     }
-    static func remove() throws { try? fm.removeItem(at: url); _ = try? runTool("/bin/launchctl", ["bootout", "gui/\(getuid())/" + label]) }
+    static func remove() throws { if fm.fileExists(atPath: url.path) { try fm.removeItem(at: url) } }
 }
