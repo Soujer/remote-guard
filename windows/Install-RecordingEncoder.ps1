@@ -1,8 +1,9 @@
 ﻿param(
     [Parameter(Mandatory=$true)][string]$Directory,
-    [string]$BundlePath = (Join-Path $PSScriptRoot 'encoder.zip')
+    [string]$BundlePath
 )
 $ErrorActionPreference = 'Stop'
+if(-not $BundlePath){$BundlePath=Join-Path $PSScriptRoot 'encoder.zip'}
 # Pinned Gyan FFmpeg 9.0.2 essentials build. No network requests at runtime.
 $expected='3256173F3F8BFFD7DF12227C68ADF68025EDB1832273A9530688A7BB1ED8EDEC'
 function Encoder-Hash([string]$Path) {

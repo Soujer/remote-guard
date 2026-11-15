@@ -544,7 +544,7 @@ if($SmokeTest){
     & $libraryView.RefreshAction
     & $libraryView.StopAction
     if($script:GuardEmbeddedPayload -and -not(Test-Path -LiteralPath $recordingView.Encoder.Text -PathType Leaf)){throw $recordingView.Status.Text}
-    if(-not $recordingView.Config){
+    if(-not $recordingView.Config -and (Test-Path -LiteralPath $recordingView.Encoder.Text -PathType Leaf)){
         $recordingView.Enabled.Checked=$true;$recordingView.Password.Text='Test12345678';$recordingView.Confirm.Clear()
         & $recordingView.SaveAction
         if($recordingView.Status.Text -notlike '*确认密码*' -or $recordingView.Status.Text -like '*不足*'){throw 'Missing confirmation must have a distinct UI error'}
