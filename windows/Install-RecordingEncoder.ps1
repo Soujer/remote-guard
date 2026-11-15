@@ -9,7 +9,9 @@ try {
     if ($checksum -notmatch '^\s*([a-fA-F0-9]{64})(\s|$)') { throw '下载源未提供有效的 SHA-256 校验值' }
     $expected = $Matches[1]
     Invoke-WebRequest -Uri $base -OutFile $temp -UseBasicParsing -TimeoutSec 600
-    if ((Get-FileHash -LiteralPath $temp -Algorithm SHA256).Hash -ine $expected) { throw 'FFmpeg 下载校验失败，请重试' }
+    $hasher=[Security.Cryptography.SHA256]::Create();$stream=[IO.File]::OpenRead($temp)
+    try{$actual=[BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-','')}finally{$stream.Dispose();$hasher.Dispose()}
+    if ($actual -ine $expected) { throw 'FFmpeg 下载校验失败，请重试' }
     Add-Type -AssemblyName System.IO.Compression.FileSystem
     [void][IO.Directory]::CreateDirectory($Directory)
     $zip = [IO.Compression.ZipFile]::OpenRead($temp)

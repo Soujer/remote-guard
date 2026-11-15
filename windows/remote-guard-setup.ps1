@@ -19,9 +19,7 @@ trap {
 if(-not $script:GuardBuildVersion){$script:GuardBuildVersion='1.3.0'}
 # ============================================================
 
-# ps2exe preloads utility cmdlets but does not always import the module's script functions.
-Import-Module Microsoft.PowerShell.Utility -Force -ErrorAction Stop
-Import-Module ScheduledTasks, CimCmdlets -ErrorAction Stop
+Import-Module ScheduledTasks, CimCmdlets -ErrorAction Stop -WarningAction SilentlyContinue
 Add-Type -AssemblyName System.Windows.Forms, System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 
@@ -46,7 +44,11 @@ if ($script:GuardEmbeddedPayload) {
             $target=Join-Path $payloadRoot $entry.FullName;$valid=$false
             if(Test-Path -LiteralPath $target){
                 $hasher=[Security.Cryptography.SHA256]::Create();$stream=$entry.Open()
-                try{$expected=[BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-','');$valid=((Get-FileHash -LiteralPath $target).Hash -eq $expected)}finally{$stream.Dispose();$hasher.Dispose()}
+                try{
+                    $expected=[BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-','')
+                    $localStream=[IO.File]::OpenRead($target)
+                    try{$actual=[BitConverter]::ToString($hasher.ComputeHash($localStream)).Replace('-','');$valid=($actual -eq $expected)}finally{$localStream.Dispose()}
+                }finally{$stream.Dispose();$hasher.Dispose()}
             }
             if(-not $valid){[IO.Compression.ZipFileExtensions]::ExtractToFile($entry,$target,$true)}
         }
@@ -534,7 +536,7 @@ $form.Add_FormClosed({
     }
 })
 if($SmokeTest){
-    foreach($requiredCommand in @('Get-FileHash','Get-ScheduledTask','Register-ScheduledTask','Get-CimInstance')){if(-not(Get-Command $requiredCommand -ErrorAction SilentlyContinue)){throw ('Missing runtime command: '+$requiredCommand)}}
+    foreach($requiredCommand in @('Get-GuardFileHash','Get-ScheduledTask','Register-ScheduledTask','Get-CimInstance')){if(-not(Get-Command $requiredCommand -ErrorAction SilentlyContinue)){throw ('Missing runtime command: '+$requiredCommand)}}
     & $libraryView.RefreshAction
     & $libraryView.StopAction
     $result=[pscustomobject]@{Tabs=@($tabs.TabPages|ForEach-Object Text);RecordingEmbedded=($recordingView.Enabled.Parent -eq $tabRecording);PlayerEmbedded=($libraryView.Picture.Parent -eq $tabLibrary);UpdaterPresent=($checkUpdate.Parent -eq $tabUpdate)}|ConvertTo-Json

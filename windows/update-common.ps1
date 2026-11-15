@@ -7,6 +7,11 @@
     return [version]'0.0.0'
 }
 
+function Get-GuardFileHash([string]$Path) {
+    $hasher=[Security.Cryptography.SHA256]::Create();$stream=[IO.File]::OpenRead($Path)
+    try{return [BitConverter]::ToString($hasher.ComputeHash($stream)).Replace('-','')}finally{$stream.Dispose();$hasher.Dispose()}
+}
+
 function Get-GuardPackageFiles {
     return @('remote-guard.exe','remote-guard-setup.exe','remote-guard-setup.ps1','remote-guard.ps1','remote-guard-instant.ps1','remote-guard-launcher.vbs','remote-guard-instant-launcher.vbs','recording-common.ps1','RecordingCrypto.cs','DesktopRuntime.cs','recording-ui.ps1','update-common.ps1','remote-guard-update.ps1','remote-guard-recorder.ps1','remote-guard-recording-setup.ps1','remote-guard-play.ps1','Install-RecordingEncoder.ps1','README.md','LICENSE','VERSION')
 }
@@ -107,7 +112,7 @@ function Install-GuardFiles([string]$Source, [string]$Directory) {
     try {
         foreach ($name in $names) {
             $target = Join-Path $Directory $name
-            if ((Test-Path -LiteralPath $target) -and (Get-FileHash -LiteralPath $target).Hash -eq (Get-FileHash -LiteralPath (Join-Path $Source $name)).Hash) { continue }
+            if ((Test-Path -LiteralPath $target) -and (Get-GuardFileHash $target) -eq (Get-GuardFileHash (Join-Path $Source $name))) { continue }
             $present[$name] = Test-Path -LiteralPath $target
             if ($present[$name]) { Copy-Item -LiteralPath $target -Destination (Join-Path $backup $name) -ErrorAction Stop }
             $changed += $name
