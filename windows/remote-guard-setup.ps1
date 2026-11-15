@@ -542,6 +542,8 @@ $form.Add_FormClosed({
 if($SmokeTest){
     foreach($requiredCommand in @('Get-GuardFileHash','Get-ScheduledTask','Register-ScheduledTask','Get-CimInstance')){if(-not(Get-Command $requiredCommand -ErrorAction SilentlyContinue)){throw ('Missing runtime command: '+$requiredCommand)}}
     & $libraryView.RefreshAction
+    [void]$form.Handle;[void]$tabs.Handle;$tabs.SelectedTab=$tabLibrary;$tabs.PerformLayout()
+    if($libraryView.Status.Bottom -gt $tabLibrary.ClientSize.Height -or $libraryView.Transport.Bottom -gt $tabLibrary.ClientSize.Height){throw 'Playback controls must fit within the tab client area'}
     $originalBounds=$libraryView.Picture.Bounds
     & $libraryView.ToggleFullScreen $false
     if(-not $libraryView.FullScreen -or $libraryView.Picture.Parent -ne $libraryView.FullScreen -or $libraryView.Picture.Top -lt 50 -or $libraryView.Picture.Bottom -gt $libraryView.Transport.Top){throw 'Fullscreen must preserve the video without covering it with transport controls'}

@@ -91,8 +91,8 @@ function New-GuardLibraryView($Parent,$RootBox) {
     $view.Password=New-Object Windows.Forms.TextBox;$view.Password.UseSystemPasswordChar=$true;$view.Password.SetBounds(100,202,350,27);$Parent.Controls.Add($view.Password)
     $play=New-Object Windows.Forms.Button;$play.Text='播放选中录像';$play.SetBounds(465,200,170,32);$Parent.Controls.Add($play)
     $stop=New-Object Windows.Forms.Button;$stop.Text='停止播放';$stop.SetBounds(650,200,150,32);$Parent.Controls.Add($stop)
-    $view.Picture=New-Object Windows.Forms.PictureBox;$view.Picture.BackColor='Black';$view.Picture.SizeMode='Zoom';$view.Picture.SetBounds(20,245,780,250);$Parent.Controls.Add($view.Picture)
-    $view.Transport=New-Object Windows.Forms.Panel;$view.Transport.SetBounds(20,500,780,90);$view.Transport.BackColor='WhiteSmoke';$view.Transport.ForeColor='Black';$Parent.Controls.Add($view.Transport)
+    $view.Picture=New-Object Windows.Forms.PictureBox;$view.Picture.BackColor='Black';$view.Picture.SizeMode='Zoom';$view.Picture.SetBounds(20,245,780,235);$Parent.Controls.Add($view.Picture)
+    $view.Transport=New-Object Windows.Forms.Panel;$view.Transport.SetBounds(20,490,780,80);$view.Transport.BackColor='WhiteSmoke';$view.Transport.ForeColor='Black';$Parent.Controls.Add($view.Transport)
     $view.Timeline=New-Object Windows.Forms.TrackBar;$view.Timeline.SetBounds(5,0,765,35);$view.Timeline.Maximum=1000;$view.Timeline.TickStyle='None';$view.Timeline.Anchor='Top, Left, Right';$view.Timeline.Enabled=$false;$view.Transport.Controls.Add($view.Timeline)
     $back=New-Object Windows.Forms.Button;$back.Text='后退 10 秒';$back.SetBounds(10,40,100,32);$view.Transport.Controls.Add($back)
     $view.Pause=New-Object Windows.Forms.Button;$view.Pause.Text='暂停';$view.Pause.SetBounds(120,40,85,32);$view.Transport.Controls.Add($view.Pause)
@@ -107,8 +107,8 @@ function New-GuardLibraryView($Parent,$RootBox) {
     $back.Add_Click({if($view.Player){$view.Player.Seek($view.Player.Position-10)}}.GetNewClosure())
     $forward.Add_Click({if($view.Player){$view.Player.Seek($view.Player.Position+10)}}.GetNewClosure())
     $view.Rate.Add_SelectedIndexChanged({if($view.Player){$view.Player.SetRate([double]::Parse($view.Rate.Text.TrimEnd('x'),[Globalization.CultureInfo]::InvariantCulture))}}.GetNewClosure())
-    $view.Status=New-Object Windows.Forms.Label;$view.Status.SetBounds(20,600,650,35);$view.Status.Text='选择录像、私钥并输入密码；双击画面可全屏，Esc 退出。';$Parent.Controls.Add($view.Status)
-    $fullButton=New-Object Windows.Forms.Button;$fullButton.Text='全屏';$fullButton.SetBounds(690,595,110,32);$Parent.Controls.Add($fullButton)
+    $view.Status=New-Object Windows.Forms.Label;$view.Status.SetBounds(20,580,650,30);$view.Status.Text='选择录像、私钥并输入密码；双击画面可全屏，Esc 退出。';$Parent.Controls.Add($view.Status)
+    $fullButton=New-Object Windows.Forms.Button;$fullButton.Text='全屏';$fullButton.SetBounds(690,575,110,32);$Parent.Controls.Add($fullButton)
     $view.RestoreFullScreen={
         if(-not $view.FullScreen){return}
         $full=$view.FullScreen;$view.FullScreen=$null
@@ -127,7 +127,7 @@ function New-GuardLibraryView($Parent,$RootBox) {
         $full=New-Object Windows.Forms.Form;$full.Text='录像播放';$full.FormBorderStyle='None';$full.BackColor='Black';$full.ForeColor='White';$full.KeyPreview=$true
         $full.StartPosition='Manual';$full.Bounds=[Windows.Forms.Screen]::FromControl($view.Picture).Bounds
         $view.EmbeddedBounds=$view.Picture.Bounds;$view.TransportBounds=$view.Transport.Bounds;$view.FullScreen=$full
-        $view.Picture.Dock='None';$view.Picture.Anchor='Top, Bottom, Left, Right';$view.Picture.SetBounds(0,50,$full.ClientSize.Width,($full.ClientSize.Height-140));$full.Controls.Add($view.Picture)
+        $view.Picture.Dock='None';$view.Picture.Anchor='Top, Bottom, Left, Right';$view.Picture.SetBounds(0,50,$full.ClientSize.Width,($full.ClientSize.Height-50-$view.Transport.Height));$full.Controls.Add($view.Picture)
         $view.Transport.Dock='Bottom';$full.Controls.Add($view.Transport);$view.Transport.BringToFront()
         $header=New-Object Windows.Forms.Panel;$header.Height=50;$header.BackColor='Black';$header.Dock='Top';$full.Controls.Add($header);$header.BringToFront()
         $exit=New-Object Windows.Forms.Button;$exit.Text='退出全屏（Esc）';$exit.BackColor='WhiteSmoke';$exit.ForeColor='Black';$exit.UseVisualStyleBackColor=$false;$exit.FlatStyle='Standard'
