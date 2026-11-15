@@ -33,7 +33,7 @@ if (-not $SetupDir) { $SetupDir = [AppDomain]::CurrentDomain.BaseDirectory }
 $GuiExecutable = Join-Path $SetupDir 'remote-guard.exe'
 if (-not $PSScriptRoot) { $GuiExecutable = [Diagnostics.Process]::GetCurrentProcess().MainModule.FileName }
 if ($script:GuardEmbeddedPayload) {
-    Add-Type -AssemblyName System.IO.Compression.FileSystem
+    Add-Type -AssemblyName System.IO.Compression, System.IO.Compression.FileSystem
     $payloadRoot = Join-Path $env:LOCALAPPDATA ('RemoteGuard\payload\' + $script:GuardBuildVersion + '-' + $script:GuardBuildCommit)
     [void][IO.Directory]::CreateDirectory($payloadRoot)
     $memory = [IO.MemoryStream]::new([Convert]::FromBase64String($script:GuardEmbeddedPayload))
