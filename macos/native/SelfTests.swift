@@ -131,6 +131,7 @@ enum SelfTests {
         let timelineBounds = desktop.timeline.convert(desktop.timeline.bounds, to: desktop.playbackSurface)
         try check(timelineBounds.minY > 500 && timelineBounds.maxY <= 720, "Fullscreen resizing must keep transport controls visible below the video")
         desktop.playbackSurface.setFrameSize(originalSurfaceSize)
+        try check(desktop.playbackSurface.frame.minY == 235 && desktop.playerView.frame.minY == 0 && desktop.playerView.frame.height == 265, "Restoring fullscreen must preserve the library and embedded video geometry")
         try check(NSApp.mainMenu?.item(at: 1)?.submenu?.item(withTitle: "粘贴")?.keyEquivalent == "v", "Native text fields must support the standard paste shortcut")
         let output = ProcessInfo.processInfo.environment["GUARD_TEST_OUTPUT"].map { URL(fileURLWithPath: $0) }
         if let output {

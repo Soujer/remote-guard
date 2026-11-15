@@ -7,7 +7,7 @@ import Security
 final class LayoutView: NSView {
     override var isFlipped: Bool { true }
     override var isOpaque: Bool { true }
-    override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); dirtyRect.fill(); super.draw(dirtyRect) }
+    override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); bounds.intersection(dirtyRect).fill(); super.draw(dirtyRect) }
 }
 final class SeekSlider: NSSlider {
     var isDragging = false
@@ -154,6 +154,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NST
         button("全屏", playback, 725, 186, 120) { [weak self] in self?.toggleFullScreen() }
         playbackSurface.frame = NSRect(x: 25, y: 235, width: 820, height: 355); playback.addSubview(playbackSurface)
         playerView.frame = NSRect(x: 0, y: 0, width: 820, height: 265); playerView.autoresizingMask = [.width, .height]
+        playerView.wantsLayer = true; playerView.layer?.backgroundColor = NSColor.black.cgColor
         playerView.controlsStyle = .none; playerView.showsFullScreenToggleButton = false; playerView.showsSharingServiceButton = false; playbackSurface.addSubview(playerView)
         let transport = LayoutView(frame: NSRect(x: 0, y: 265, width: 820, height: 90)); transport.autoresizingMask = [.width, .minYMargin]; playbackSurface.addSubview(transport)
         timeline.frame = NSRect(x: 10, y: 3, width: 800, height: 30); timeline.autoresizingMask = [.width]; timeline.target = self; timeline.action = #selector(scrub(_:)); timeline.isContinuous = false; timeline.isEnabled = false; transport.addSubview(timeline)
