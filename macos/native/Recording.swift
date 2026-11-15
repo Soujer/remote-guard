@@ -102,7 +102,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
                         let stream = SCStream(filter: filter, configuration: configuration, delegate: self)
                         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue); self.stream = stream
                         stream.startCapture { error in self.queue.async {
-                            guard request == self.generation else { return }
+                            guard request == self.generation else { stream.stopCapture { _ in }; return }
                             if let error { self.stop(reason: "录屏启动失败：" + error.localizedDescription); return }
                             let timer = DispatchSource.makeTimerSource(queue: self.queue); timer.schedule(deadline: .now(), repeating: .milliseconds(200)); timer.setEventHandler { self.tick() }; self.timer = timer; timer.resume()
                             self.report("加密录屏进行中（主显示器，无声音）", true)
@@ -113,10 +113,10 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         }
     }
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of type: SCStreamOutputType) {
-        guard type == .screen, CMSampleBufferIsValid(sampleBuffer), let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        guard self.stream === stream, type == .screen, CMSampleBufferIsValid(sampleBuffer), let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         latest = pixel
     }
-    func stream(_ stream: SCStream, didStopWithError error: Error) { stop(reason: "屏幕采集停止：" + error.localizedDescription) }
+    func stream(_ stream: SCStream, didStopWithError error: Error) { queue.async { if self.stream === stream { self.stop(reason: "屏幕采集停止：" + error.localizedDescription) } } }
     private func tick() {
         guard let latest else { return }
         do {

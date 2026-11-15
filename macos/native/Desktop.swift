@@ -15,6 +15,8 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var tracker = SessionTracker()
     private var active = Set<String>()
     private var sampling = false, requestedRecording = false, terminating = false, updating = false, checkingUpdate = false
+    private var samplingFailed = false
+    private var lastSamplingError = Date.distantPast
     private var nextRecordingRetry = Date.distantPast, nextUpdateCheck = Date.distantPast, nextInstallTry = Date.distantPast
     private var available: MacUpdate?
     private let recorder = Recorder()
@@ -81,6 +83,11 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let item = NSTabViewItem(identifier: name); item.label = name; let view = LayoutView(frame: NSRect(x: 0, y: 0, width: 900, height: 640)); item.view = view; tabs.addTabViewItem(item); return view
     }
     func buildWindow() {
+        let mainMenu = NSMenu(), appItem = NSMenuItem(), editItem = NSMenuItem()
+        let appMenu = NSMenu(); appMenu.addItem(withTitle: "退出远程守护", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q"); appItem.submenu = appMenu; mainMenu.addItem(appItem)
+        let editMenu = NSMenu(title: "编辑")
+        for (title, selector, key) in [("撤销", "undo:", "z"), ("剪切", "cut:", "x"), ("复制", "copy:", "c"), ("粘贴", "paste:", "v"), ("全选", "selectAll:", "a")] { editMenu.addItem(withTitle: title, action: NSSelectorFromString(selector), keyEquivalent: key) }
+        editItem.submenu = editMenu; mainMenu.addItem(editItem); NSApp.mainMenu = mainMenu
         let height = min(800, (NSScreen.main?.visibleFrame.height ?? 850) - 50)
         window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: height), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.minSize = NSSize(width: 940, height: 600)
@@ -139,6 +146,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func attempt(_ handler: () throws -> Void) { do { try handler() } catch { footer.stringValue = error.localizedDescription; logGuard(error.localizedDescription) } }
     private func refreshStatus() {
         monitorStatus.stringValue = (settings.monitoring ? "后台监控已启动" : "监控未启动") + "\n" + (active.isEmpty ? "当前未确认远程会话" : active.sorted().joined(separator: "、") + " 已连接")
+        if settings.monitoring && samplingFailed { monitorStatus.stringValue += "\n网络采样异常，保留上次状态" }
         if !settings.recording { recordingStatus.stringValue = "录屏未启用" }
     }
     private func setMonitoring(_ enabled: Bool) {
@@ -246,7 +254,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         libraryFiles = ((try? RecordingStorage.files(URL(fileURLWithPath: settings.directory))) ?? []).filter { $0.pathExtension == "rgrec" }.reversed()
         library.removeAllItems(); library.addItems(withObjectValues: libraryFiles.map { $0.lastPathComponent }); if !libraryFiles.isEmpty { library.selectItem(at: 0) }
     }
-    private func chooseRecording() { let panel = NSOpenPanel(); panel.allowedFileTypes = ["rgrec"]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK, let url = panel.url { selectedRecording = url; library.deselectItem(at: library.indexOfSelectedItem); footer.stringValue = "已选择录像：" + url.lastPathComponent } }
+    private func chooseRecording() { let panel = NSOpenPanel(); panel.allowedFileTypes = ["rgrec"]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK, let url = panel.url { selectedRecording = url; if library.indexOfSelectedItem >= 0 { library.deselectItem(at: library.indexOfSelectedItem) }; footer.stringValue = "已选择录像：" + url.lastPathComponent } }
     private func choosePlaybackKey() { let panel = NSOpenPanel(); panel.allowedFileTypes = ["rgkey"]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK, let url = panel.url { selectedKey = url; keyLabel.stringValue = url.lastPathComponent } }
     private func play() {
         stopPlayback()
@@ -289,6 +297,8 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
             let sample = try? Detection.sample()
             DispatchQueue.main.async {
                 self.sampling = false; guard self.settings.monitoring && !self.terminating else { return }
+                self.samplingFailed = sample == nil
+                if sample == nil && Date().timeIntervalSince(self.lastSamplingError) >= 60 { logGuard("网络采样失败，保留上次会话状态"); self.lastSamplingError = Date() }
                 let previous = self.active; self.active = self.tracker.update(sample, now: Date().timeIntervalSince1970)
                 for name in self.active.subtracting(previous) { Notifications.send(name + " 已连接", body: "已连接", settings: self.settings) { _ in } }
                 for name in previous.subtracting(self.active) { Notifications.send(name + " 已断开", body: "已断开", settings: self.settings) { _ in } }

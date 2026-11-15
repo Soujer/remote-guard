@@ -10,6 +10,16 @@ enum SelfTests {
         try ensureDirectory(root); defer { try? fm.removeItem(at: root) }
         let password = "Interop123456", key = root.appendingPathComponent("test.rgkey")
         let publicKey = try Vault.createKey(key, password: password)
+        var storage = Settings(); storage.directory = root.appendingPathComponent("quota").path; storage.quotaMB = 128
+        let storageRoot = URL(fileURLWithPath: storage.directory); try ensureDirectory(storageRoot)
+        let old = storageRoot.appendingPathComponent("rg-20261115T010000000Z-" + String(repeating: "a", count: 32) + ".rgrec")
+        let recent = storageRoot.appendingPathComponent("rg-20261115T020000000Z-" + String(repeating: "b", count: 32) + ".rgrec.partial")
+        for file in [old, recent] { fm.createFile(atPath: file.path, contents: nil); let handle = try FileHandle(forWritingTo: file); try handle.truncate(atOffset: 67_108_864); try handle.close() }
+        try fm.setAttributes([.modificationDate: Date.distantPast], ofItemAtPath: old.path)
+        let unrelated = storageRoot.appendingPathComponent("important.txt"); try Data("preserve".utf8).write(to: unrelated)
+        try RecordingStorage.prepare(storage, reserve: 1_048_576)
+        try check(!fm.fileExists(atPath: old.path) && fm.fileExists(atPath: recent.path), "Storage quota must remove the oldest recording first, including partial segments")
+        try check(fm.fileExists(atPath: unrelated.path), "Quota cleanup must preserve unrelated files")
         try check(!publicKey.contains("<D>"), "Recording config must never contain a private key")
         try check(Vault.passwordError("Test12345678", "Test12345678") == nil, "Accept exactly twelve matching characters")
         try check(Vault.passwordError("Test12345678", "")!.contains("确认"), "Request missing confirmation")
@@ -68,6 +78,13 @@ enum SelfTests {
             try SafeZIP.extract(bytes, zipURL: zip, directory: extracted)
             let signed = try runTool("/usr/bin/codesign", ["--verify", "--deep", "--strict", extracted.appendingPathComponent("RemoteGuard.app").path])
             try check(signed.code == 0, "A safely extracted universal app must preserve its signature")
+            for name in ["settings.json", "private.rgkey"] {
+                let extra = root.appendingPathComponent(name), badZIP = root.appendingPathComponent(name + ".zip")
+                try Data("must never be packaged".utf8).write(to: extra); try fm.copyItem(at: zip, to: badZIP)
+                let added = try runTool("/usr/bin/zip", ["-q", "-j", badZIP.path, extra.path]); try check(added.code == 0, "Create a malformed package for validation")
+                var rejected = false; do { _ = try SafeZIP.entries(Data(contentsOf: badZIP)) } catch { rejected = true }
+                try check(rejected, "Reject update packages containing runtime settings or private keys")
+            }
         }
         let fixtureURL = URL(fileURLWithPath: ProcessInfo.processInfo.environment["GUARD_FIXTURE"] ?? "macos/Tests/windows-interop.json")
         if fm.fileExists(atPath: fixtureURL.path) {
