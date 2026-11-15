@@ -35,6 +35,8 @@ $Root      = $PSScriptRoot
 if (-not $Root) { $Root = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $StateFile = Join-Path $Root 'state.json'
 $LogFile   = Join-Path $Root 'remote-guard.log'
+$recordingCommon = Join-Path $Root 'recording-common.ps1'
+if (Test-Path -LiteralPath $recordingCommon) { . $recordingCommon }
 
 # ---------- Bark 推送配置 ----------
 # （推送通道统一走 push-channels.json 配置，见 Send-Push）
@@ -784,6 +786,10 @@ try {
 }
 
 # ---------- 看护即时通道进程（几秒级推送的常驻监视器） ----------
+if (-not $Seed -and (Get-Command Start-GuardRecording -ErrorAction SilentlyContinue)) {
+    Start-GuardRecording $Root $stateControlled
+}
+
 try {
     $pidFile = Join-Path $Root 'instant.pid'
     $instantAlive = $false

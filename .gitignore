@@ -7,3 +7,13 @@ state.json
 *.log
 *.log.1
 /release/
+# Local recording credentials, media and downloaded codecs
+recording.json
+recording.json.tmp
+recording.pid
+recording-retry.json
+*.rgkey
+*.rgrec
+*.rgrec.partial
+recordings/
+ffmpeg/

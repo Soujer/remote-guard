@@ -1,6 +1,6 @@
 ﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.1.0',
+    [string]$Version = '1.2.0',
     [string]$OutputDirectory
 )
 
@@ -25,7 +25,7 @@ $staging = Join-Path $OutputDirectory ('.build-v' + $Version + '-' + [guid]::New
 $windows = Join-Path $staging 'remote-guard-windows'
 $macos = Join-Path $staging 'remote-guard-macos'
 [void](New-Item -ItemType Directory -Path $windows, $macos)
-$windowsFiles = @('remote-guard.ps1', 'remote-guard-instant.ps1', 'remote-guard-setup.ps1', 'remote-guard-launcher.vbs', 'remote-guard-instant-launcher.vbs')
+$windowsFiles = @('remote-guard.ps1', 'remote-guard-instant.ps1', 'remote-guard-setup.ps1', 'remote-guard-launcher.vbs', 'remote-guard-instant-launcher.vbs', 'recording-common.ps1', 'RecordingCrypto.cs', 'remote-guard-recorder.ps1', 'remote-guard-recording-setup.ps1', 'remote-guard-play.ps1', 'Install-RecordingEncoder.ps1')
 foreach ($name in $windowsFiles) {
     Copy-Item -LiteralPath (Join-Path (Join-Path $repo 'windows') $name) -Destination (Join-Path $windows $name)
 }

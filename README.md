@@ -6,7 +6,7 @@
 
 ## 下载
 
-到 [GitHub Releases](https://github.com/Soujer/remote-guard/releases/latest) 下载对应平台发行版。当前版本：**v1.1.1**。
+到 [Gitee 发行版](https://gitee.com/Soujer/remote-guard/releases) 或 [GitHub Releases](https://github.com/Soujer/remote-guard/releases/latest) 下载对应平台发行版。当前版本：**v1.2.0**。
 
 | 平台 | 发行包 | 使用 |
 |---|---|---|
@@ -62,6 +62,28 @@ bash install-macos.sh         # 测试通道 + 注册 launchd + 启动即时监�
 ```
 
 卸载：`bash install-macos.sh remove`
+
+## 远程连接自动加密录屏（Windows）
+
+在配置程序中点击 **“加密录屏设置 / 播放”**，选择录像目录和存储上限。首次启用需选择或下载 FFmpeg，设置至少 12 位密码，并另存一份 `.rgkey` 播放私钥。程序只保存公钥；密码不会保存。私钥请备份到其他安全位置，与密码分开保管。**私钥或密码丢失，录像无法恢复。** 配置成功后，已安装的新版监控程序会在下一次确认远程会话时开始录制。
+
+- 只在确认的受控会话中录制，不因远控软件运行或可疑事件告警单独开始。多个远控同时连接只录一份；全部确认断开后停止。沿用检测器约 3 分钟的断开观察期，因此实际断开后可能继续录制这段时间。录屏从确认时开始，不能回溯之前的操作。
+- 默认捕获当前用户桌面（包含桌面上的显示器），缩放到最大 1280×720，5 帧/秒、H.264、约 400 kbps，无音频。参考大小约 **3 MB/分钟、15 MB/5 分钟、180 MB/小时**，实际随画面与编码开销变化。多显示器画面缩小后文字可能不清晰，帧率不适合游戏录像。
+- 每 5 分钟独立保存一份 `.rgrec` 加密片段，片段切换可能有短暂间隙。默认总上限 **2 GB**，预留下一段空间时自动删除最旧片段；另留至少 **512 MB** 磁盘空间，空间不足时停止并记录错误。请及时备份要保留的录像。容量上限包含本程序遗留的 `.partial` 文件，不清理其他文件。
+- MP4 压缩流经内存管道直接加密写盘，自动录屏不产生明文临时视频。采用 RSA-3072 OAEP-SHA256 包装随机 AES-256-CBC/HMAC-SHA256 密钥，每段独立随机密钥和 IV；播放先验证完整性，再解密到 FFplay 的内存管道。`.rgkey` 私钥以 PBKDF2-HMAC-SHA256（210000 次迭代）派生密钥加密并校验完整性。
+- 播放：点击 **“打开加密录像”**，依次选择 `.rgrec`、`.rgkey` 并输入密码。可把录屏脚本、`RecordingCrypto.cs`、FFplay、私钥和录像复制到另一台 Windows 电脑上播放。私钥和密码不通过命令行传递，也不会上传录像。
+- 录屏故障与推送相互独立。异常断电或强杀进程可能留下当前片段的 `.partial`，该片段不能保证恢复，之前完成的分段仍可播放。日志见安装目录 `recording.log`。持续故障每分钟重试，避免反复拉起编码器。
+- FFmpeg/FFplay 按需从 [Gyan Windows 构建](https://www.gyan.dev/ffmpeg/builds/) 下载并核对发布方 SHA-256，不随源码或安装包捆绑。编码器路径可自选，推荐 Windows 10/11。使用 [FFmpeg 的 gdigrab](https://ffmpeg.org/ffmpeg-devices.html#gdigrab) 和可通过管道输出的 [分片 MP4](https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv)。锁屏、安全桌面、受保护内容或断开后的 RDP 桌面可能无法捕获；只覆盖监控进程所在的交互用户会话。macOS 暂不提供录屏。
+
+高级参数位于安装目录 `recording.json`，默认录像目录为 `<安装目录>\recordings`。可以手动调整 `segmentSeconds`（30–900）、`fps`（1–15）、`width`（640–1920，按 16:9 限制高度）、`bitrateKbps`（100–2000）、`maxStorageMB`（128 MB–1 TB）与 `minFreeMB`（至少 128 MB）。设置页保存时使用默认编码参数。单段有严格字节上限，超限不会写满磁盘；未完成片段保留为 `.partial`。禁用录屏会保存当前片段后停止。
+
+验证录屏（不捕获真实桌面、不发送通知）：
+
+```powershell
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-RecordingRegression.ps1
+# 可额外验证合成画面编码、加密和解密后的视频可解码性：
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-RecordingRegression.ps1 -FFmpeg C:\path\to\ffmpeg.exe
+```
 
 ## 双通道架构
 
@@ -122,7 +144,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Regression.p
 重新打包发行版（Windows，需要已安装 ps2exe）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.1.1
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.2.0
 ```
 
 产物写入 `release/`，包含 Windows ZIP、macOS TAR.GZ 和 SHA-256 校验文件；每个平台包内的 `VERSION` 记录版本及源码提交。

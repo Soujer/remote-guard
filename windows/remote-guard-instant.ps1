@@ -12,6 +12,8 @@ if (-not $Root) { $Root = Split-Path -Parent $MyInvocation.MyCommand.Path }
 $LogFile   = Join-Path $Root 'remote-guard.log'
 $PidFile   = Join-Path $Root 'instant.pid'
 $InstState = Join-Path $Root 'instant-state.json'
+$recordingCommon = Join-Path $Root 'recording-common.ps1'
+if (Test-Path -LiteralPath $recordingCommon) { . $recordingCommon }
 
 # （推送通道统一走 push-channels.json 配置，见 Send-Push）
 
@@ -269,6 +271,9 @@ try {
             $tmp = $InstState + '.tmp'
             $ist | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $tmp -Encoding UTF8
             Move-Item -LiteralPath $tmp -Destination $InstState -Force
+            if (Get-Command Start-GuardRecording -ErrorAction SilentlyContinue) {
+                Start-GuardRecording $Root ($ist.activeTools.Count -gt 0)
+            }
         } catch {
             # 采集失败不等同断开，不更新状态，等下一轮恢复采集。
             Write-Log ('即时采样失败: ' + $_.Exception.Message)

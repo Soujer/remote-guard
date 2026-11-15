@@ -24,6 +24,7 @@ if (-not (Test-Path $InstallRoot)) { $InstallRoot = Join-Path $env:USERPROFILE '
 $SetupDir    = $PSScriptRoot
 # ps2exe 编译后没有脚本路径，守护文件仍位于 exe 同目录。
 if (-not $SetupDir) { $SetupDir = [AppDomain]::CurrentDomain.BaseDirectory }
+if (Test-Path -LiteralPath (Join-Path $SetupDir 'push-channels.json')) { $InstallRoot = $SetupDir }
 
 # ---------- 布局 ----------
 $form                = New-Object System.Windows.Forms.Form
@@ -144,6 +145,19 @@ $btnSave.Location    = New-Object System.Drawing.Point(25, 70)
 $btnSave.Size        = New-Object System.Drawing.Size(120, 32)
 $gbDeploy.Controls.Add($btnSave)
 
+$btnRecording = New-Object System.Windows.Forms.Button
+$btnRecording.Text = '加密录屏设置 / 播放'
+$btnRecording.Location = New-Object System.Drawing.Point(400, 112)
+$btnRecording.Size = New-Object System.Drawing.Size(240, 28)
+$gbDeploy.Controls.Add($btnRecording)
+$btnRecording.BringToFront()
+$btnRecording.Add_Click({
+    $scriptPath = Join-Path $SetupDir 'remote-guard-recording-setup.ps1'
+    if (Test-Path -LiteralPath $scriptPath) {
+        Start-Process powershell.exe -ArgumentList ('-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -STA -File "' + $scriptPath + '" -Directory "' + $txtDir.Text + '"') -WindowStyle Hidden
+    } else { Set-Status '缺少录屏配置程序，请下载完整新版发行包' 'Red' }
+})
+
 $btnDeploy           = New-Object System.Windows.Forms.Button
 $btnDeploy.Text      = '一键部署（复制脚本+注册任务+启动监控）'
 $btnDeploy.Location  = New-Object System.Drawing.Point(155, 70)
@@ -160,7 +174,7 @@ $lblStatus           = New-Object System.Windows.Forms.Label
 $lblStatus.Text      = '就绪。'
 $lblStatus.ForeColor = 'DarkGreen'
 $lblStatus.Location  = New-Object System.Drawing.Point(25, 110)
-$lblStatus.Size      = New-Object System.Drawing.Size(620, 40)
+$lblStatus.Size      = New-Object System.Drawing.Size(365, 40)
 $gbDeploy.Controls.Add($lblStatus)
 $form.Controls.Add($gbDeploy)
 
@@ -345,7 +359,7 @@ $btnDeploy.Add_Click({
         if (-not (Save-Config)) { $btnDeploy.Enabled = $true; return }
 
         # 2. 复制守护文件
-        $files = @('remote-guard.ps1', 'remote-guard-instant.ps1', 'remote-guard-launcher.vbs', 'remote-guard-instant-launcher.vbs')
+        $files = @('remote-guard.ps1', 'remote-guard-instant.ps1', 'remote-guard-launcher.vbs', 'remote-guard-instant-launcher.vbs', 'recording-common.ps1', 'RecordingCrypto.cs', 'remote-guard-recorder.ps1', 'remote-guard-recording-setup.ps1', 'remote-guard-play.ps1', 'Install-RecordingEncoder.ps1')
         foreach ($f in $files) {
             $src = Join-Path $SetupDir $f
             if (Test-Path $src) { Copy-Item $src -Destination (Join-Path $dir $f) -Force }
@@ -388,6 +402,13 @@ $btnUninstall.Add_Click({
     try {
         $dir = $txtDir.Text
         Unregister-ScheduledTask -TaskName 'remote-guard' -Confirm:$false -ErrorAction SilentlyContinue
+        $recordConfig = Join-Path $dir 'recording.json'
+        if (Test-Path -LiteralPath $recordConfig) {
+            $recordCfg = Get-Content -LiteralPath $recordConfig -Raw -Encoding UTF8 | ConvertFrom-Json
+            $recordCfg.enabled = $false
+            $recordCfg | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ($recordConfig + '.tmp') -Encoding UTF8
+            Move-Item -LiteralPath ($recordConfig + '.tmp') -Destination $recordConfig -Force
+        }
         $pidFile = Join-Path $dir 'instant.pid'
         if (Test-Path $pidFile) {
             $old = Get-Content $pidFile -ErrorAction SilentlyContinue
