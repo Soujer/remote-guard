@@ -6,21 +6,21 @@
 
 ## 下载
 
-到 [Gitee 发行版](https://gitee.com/Soujer/remote-guard/releases) 或 [GitHub Releases](https://github.com/Soujer/remote-guard/releases/latest) 下载对应平台发行版。当前版本：**v1.3.2**。
+到 [Gitee 发行版](https://gitee.com/Soujer/remote-guard/releases) 或 [GitHub Releases](https://github.com/Soujer/remote-guard/releases) 下载对应平台发行版。Windows 当前版本 **v1.3.3**，macOS 原生桌面版 **v1.4.0**。
 
-Windows 推荐直接下载 **`remote-guard-v1.3.2.exe`**，双击打开统一桌面程序，内置录屏与播放组件，首次使用无需额外下载。软件内包含“监控、推送、加密录屏、录像播放、更新”五个页面。`remote-guard-setup.exe` 为兼容旧入口保留的同一程序。
+Windows 推荐直接下载 **`remote-guard-v1.3.3.exe`**。macOS 下载 **`remote-guard-macos-universal-v1.4.0.zip`**，同一个程序支持 Apple 芯片与 Intel，要求 macOS 13 或更新系统。两端均提供“监控、推送、加密录屏、录像播放、更新”，首次使用无需额外下载录屏组件；播放器支持全屏、双击切换与 Esc 退出。`remote-guard-setup.exe` 保留为 Windows 兼容入口。
 
 | 平台 | 发行包 | 使用 |
 |---|---|---|
 | Windows | `remote-guard-vX.X.X.exe` 或 Windows ZIP | 双击 exe；ZIP 中运行 `remote-guard.exe` |
-| macOS | `remote-guard-macos-vX.X.tar.gz` | 解压 → `bash install-macos.sh` |
+| macOS 13+（Apple 芯片 / Intel） | `remote-guard-macos-universal-vX.X.X.zip` | 解压 → 将 `RemoteGuard.app` 放到应用程序文件夹并打开 |
 
 ## 支持平台
 
 | 平台 | 实现 | 入口 |
 |---|---|---|
 | **Windows** | 统一桌面程序，计划任务 + 常驻即时进程 | `remote-guard.exe`（监控、推送、录屏、播放、自动更新） |
-| **macOS** | 纯 bash（零依赖），launchd 每分钟 + 常驻即时通道 | `macos/install-macos.sh` |
+| **macOS** | 原生桌面软件，ScreenCaptureKit + 系统视频编码 / 播放 | `RemoteGuard.app`（监控、推送、录屏、播放、自动更新） |
 
 ## 检测能力（Windows）
 
@@ -36,6 +36,10 @@ Windows 推荐直接下载 **`remote-guard-v1.3.2.exe`**，双击打开统一桌
 | 输入诊断 | `-DryRun` 只统计输入时间戳和桌面状态，不记录按键；本机输入不建立或延长受控状态 |
 
 ## 检测能力（macOS）
+
+原生桌面版每 2 秒采样，要求远控进程的已建立入站连接对应同一进程的监听端口，连续两次确认后建立会话；断开观察期为 3 分钟。支持识别屏幕共享、UU、ToDesk、向日葵、RustDesk、AnyDesk、TeamViewer、Chrome 远程桌面和 Parsec 的对应进程。进程存在、CPU 占用和 80/443 心跳不单独触发录屏；采样失败时保留之前的状态。纯出站中继连接、不同版本进程名或权限不足可能漏报，不能保证覆盖全部远控版本。
+
+下面为保留的旧版 Bash 检测方式；旧脚本仅提供检测和推送：
 
 | 检测项 | 方式 |
 |---|---|
@@ -56,6 +60,18 @@ Windows 推荐直接下载 **`remote-guard-v1.3.2.exe`**，双击打开统一桌
 
 ## 快速开始（macOS）
 
+1. 下载通用版 ZIP，解压后把 `RemoteGuard.app` 拖到 `/Applications` 或 `~/Applications`，双击打开。
+2. 在“推送”页填写 Bark key 或 hayo token，保存后测试；在“监控”页启动监控，可勾选登录时后台运行。关闭窗口后菜单栏仍可打开软件。
+3. 在“加密录屏”页点击“授权屏幕录制”，在系统设置中允许；系统要求时重启软件。只录主显示器画面，不录声音，且排除本软件窗口。
+4. 勾选自动加密录屏，选择保存目录和容量上限，输入至少 12 位密码和确认密码，保存 `.rgkey` 私钥。已有 Windows 私钥可输入密码后“导入已有私钥”，无需重新生成。
+5. 可点击“测试录屏（5 秒）”先验证本机权限与编码；在“录像播放”页选择片段、私钥、密码后播放。Windows / macOS 的密钥与录像格式兼容。
+
+默认数据目录为 `~/Library/Application Support/RemoteGuard`，录像位于其中的 `recordings`，不存在时自动创建。原生程序使用系统录屏、H.264 编码和 AVKit 播放，组件随系统提供，不需要 FFmpeg、Python 或额外下载。登录启动与自动更新需要将应用放在可写的应用程序目录，推荐 `~/Applications`。
+
+本项目当前使用本地签名，尚未做 Apple Developer ID 公证。首次打开若系统阻止，可在“系统设置 → 隐私与安全性”中允许打开。系统的屏幕录制权限仍需手动授予，更新后可能需要再次确认。
+
+旧版命令行安装方式仍保留：
+
 ```bash
 cd macos
 cp push-channels.conf.example push-channels.conf
@@ -65,19 +81,19 @@ bash install-macos.sh         # 测试通道 + 注册 launchd + 启动即时监�
 
 卸载：`bash install-macos.sh remove`
 
-## 远程连接自动加密录屏（Windows）
+## 远程连接自动加密录屏（Windows / macOS）
 
-在软件的 **“加密录屏”** 页面选择录像目录和存储上限。首次启用需选择或下载录屏组件，设置至少 12 位密码，并另存一份 `.rgkey` 播放私钥。程序只保存公钥；密码不会保存。私钥请备份到其他安全位置，与密码分开保管。**私钥或密码丢失，录像无法恢复。** 配置成功后，已启动的监控程序会在下一次确认远程会话时开始录制。
+在软件的 **“加密录屏”** 页面选择录像目录和存储上限。录屏组件已内置或由系统提供。首次启用需设置至少 12 位密码，并另存一份 `.rgkey` 播放私钥。程序只保存公钥；密码不会保存。私钥请备份到其他安全位置，与密码分开保管。**私钥或密码丢失，录像无法恢复。** 配置成功后，已启动的监控程序会在下一次确认远程会话时开始录制。
 
 - 只在确认的受控会话中录制，不因远控软件运行或可疑事件告警单独开始。多个远控同时连接只录一份；全部确认断开后停止。沿用检测器约 3 分钟的断开观察期，因此实际断开后可能继续录制这段时间。录屏从确认时开始，不能回溯之前的操作。
-- 默认捕获当前用户桌面（包含桌面上的显示器），缩放到最大 1280×720，5 帧/秒、H.264、约 400 kbps，无音频。参考大小约 **3 MB/分钟、15 MB/5 分钟、180 MB/小时**，实际随画面与编码开销变化。多显示器画面缩小后文字可能不清晰，帧率不适合游戏录像。
+- Windows 捕获当前用户桌面；macOS 捕获主显示器。画面缩放到最大 1280×720，5 帧/秒、H.264、约 400 kbps，无音频。参考大小约 **3 MB/分钟、15 MB/5 分钟、180 MB/小时**，实际随画面与编码开销变化。多显示器画面缩小后文字可能不清晰，帧率不适合游戏录像。
 - 每 5 分钟独立保存一份 `.rgrec` 加密片段，片段切换可能有短暂间隙。默认总上限 **2 GB**，预留下一段空间时自动删除最旧片段；另留至少 **512 MB** 磁盘空间，空间不足时停止并记录错误。请及时备份要保留的录像。容量上限包含本程序遗留的 `.partial` 文件，不清理其他文件。
 - MP4 压缩流经内存管道直接加密写盘，自动录屏不产生明文临时视频。采用 RSA-3072 OAEP-SHA256 包装随机 AES-256-CBC/HMAC-SHA256 密钥，每段独立随机密钥和 IV；播放先验证完整性，再通过内存管道解密和解码。`.rgkey` 私钥以 PBKDF2-HMAC-SHA256（210000 次迭代）派生密钥加密并校验完整性。
-- 播放：在 **“录像播放”** 页面选择已保存的录像，或点击“打开录像”选择其他 `.rgrec`，选择 `.rgkey` 并输入密码，画面直接在主窗口内播放。解密流通过内存管道交给 FFmpeg 解码，不写出明文视频。另一台 Windows 电脑只需同一软件、录屏组件、私钥和录像即可播放，无需启用自动录屏。私钥和密码不通过命令行传递，也不会上传录像。
-- 录屏故障与推送相互独立。异常断电或强杀进程可能留下当前片段的 `.partial`，该片段不能保证恢复，之前完成的分段仍可播放。日志见安装目录 `recording.log`。持续故障每分钟重试，避免反复拉起编码器。
-- Windows 64 位发行版内置 [Gyan FFmpeg 9.0.2](https://www.gyan.dev/ffmpeg/builds/)，自动释放到安装目录 `ffmpeg` 并核对固定 SHA-256，录屏与内嵌播放均无需下载额外组件。密码与右侧确认密码分别校验，恰好 12 位且两次一致即可创建私钥，空格和大小写按原样保留。编码器路径也可自选，支持 Windows 10/11。使用 [FFmpeg 的 gdigrab](https://ffmpeg.org/ffmpeg-devices.html#gdigrab) 和可通过管道输出的 [分片 MP4](https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv)。锁屏、安全桌面、受保护内容或断开后的 RDP 桌面可能无法捕获；只覆盖监控进程所在的交互用户会话。macOS 暂不提供录屏。
+- 播放：在 **“录像播放”** 页面选择 `.rgrec`、`.rgkey` 并输入密码，在主窗口内播放；点击“全屏”或双击画面放大，Esc 返回。Windows 使用内置 FFmpeg，macOS 使用系统 AVKit；均先验证录像完整性，再在内存中解密和解码，不写出明文视频。另一台电脑只需软件、匹配的私钥和录像即可播放，无需启用自动录屏。密钥与录像格式跨平台兼容；私钥和密码不通过命令行传递，也不会上传录像。
+- 录屏故障与推送相互独立。异常断电或强杀进程可能留下当前片段的 `.partial`，该片段不能保证恢复，之前完成的分段仍可播放。Windows 日志为安装目录 `recording.log`，macOS 为数据目录 `remote-guard.log`。持续故障每分钟重试。
+- Windows 64 位发行版内置 [Gyan FFmpeg 9.0.2](https://www.gyan.dev/ffmpeg/builds/)，自动释放到安装目录 `ffmpeg` 并核对固定 SHA-256。密码与确认密码分别校验，恰好 12 位且两次一致即可创建私钥，空格和大小写按原样保留。编码器路径也可自选，支持 Windows 10/11。使用 [FFmpeg 的 gdigrab](https://ffmpeg.org/ffmpeg-devices.html#gdigrab) 和 [分片 MP4](https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv)。macOS 使用 ScreenCaptureKit 捕获主显示器、AVAssetWriter 在内存输出分片 MP4 后直接加密。锁屏、安全桌面、受保护内容或断开后的 RDP 桌面可能无法捕获。
 
-高级参数位于安装目录 `recording.json`，默认录像目录为 `<安装目录>\recordings`。可以手动调整 `segmentSeconds`（30–900）、`fps`（1–15）、`width`（640–1920，按 16:9 限制高度）、`bitrateKbps`（100–2000）、`maxStorageMB`（128 MB–1 TB）与 `minFreeMB`（至少 128 MB）。设置页保存时使用默认编码参数。单段有严格字节上限，超限不会写满磁盘；未完成片段保留为 `.partial`。禁用录屏会保存当前片段后停止。
+Windows 高级参数位于安装目录 `recording.json`，默认录像目录为 `<安装目录>\recordings`。可以手动调整 `segmentSeconds`（30–900）、`fps`（1–15）、`width`（640–1920，按 16:9 限制高度）、`bitrateKbps`（100–2000）、`maxStorageMB`（128 MB–1 TB）与 `minFreeMB`（至少 128 MB）。设置页保存时使用默认编码参数。单段有严格字节上限，超限不会写满磁盘；未完成片段保留为 `.partial`。禁用录屏会保存当前片段后停止。
 
 ## Gitee 自动更新（Windows）
 
@@ -86,6 +102,8 @@ bash install-macos.sh         # 测试通道 + 注册 launchd + 启动即时监�
 更新器只接受固定仓库的正式版本与指定名称的 Windows ZIP/SHA-256 清单，跳过预发行、缺少附件的版本与降级。下载后先核对 SHA-256，再检查压缩包文件白名单、大小、重复项、安全路径与内部版本。正在远程连接、录屏或主界面尚未关闭时延后安装。失败会记录在 `update.log`，下次检查重试。
 
 文件替换前会备份程序；替换失败自动恢复旧文件并恢复原来的监控运行状态。更新只替换程序文件，保留 `push-channels.json`、`recording.json`、`updates.json`、私钥、录像与已释放的组件。备份放在安装目录 `backups`。v1.3.0 自动更新先安装小体积兼容补丁 v1.3.1，下次检查再安装内置组件版；也可直接下载最新单文件 EXE。旧的 v1.2.x 需要先下载一次新版，之后由软件自动更新。
+
+macOS 原生版也每 6 小时从同一 Gitee 仓库检查正式版，使用独立的通用 ZIP 与 `SHA256SUMS-macos-vX.X.X.txt` 清单。下载有大小上限，核对 SHA-256、文件白名单、本地 / 中央 ZIP 路径、签名完整性、应用标识、版本及两种架构后才安装。远程连接、录屏、播放或窗口打开时延后自动安装；替换失败恢复旧应用。数据、私钥和录像位于应用包之外，更新保留；应用备份放到数据目录的 `backups`。旧版 Bash 用户需要先下载一次原生程序，新版启动监控时会备份并替换旧版 launchd 任务，避免重复告警。
 
 验证录屏（不捕获真实桌面、不发送通知）：
 
@@ -100,7 +118,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-RecordingReg
 - **Windows 即时进程**（常驻，2 秒轮询）：UU/ToDesk 首次采样建立基线，连续两次有效流量增长后告警（通常约 4~8 秒，取决于系统采集耗时）；会话信号连续消失 3 分钟后解除。
 - **Windows 主任务**（计划任务每分钟）：读取即时通道的会话状态，避免相反或重复通知；即时通道不可用时回退到连续两轮检测；负责深度检测和进程看护。
 - **Windows 会话通知**：只显示工具名和“已连接”或“已断开”，每次状态变化通知一次；持续连接不重复提醒。检测细节保留在本地日志。
-- **macOS** 仍采用独立的即时/分钟检测逻辑，本轮 Windows 会话确认与去重改动不适用于 macOS。
+- **macOS 原生版** 使用独立的保守会话确认与状态变化通知；旧版 Bash 仍保留自己的即时 / 分钟检测逻辑。
 
 ## 推送通道配置
 
@@ -154,10 +172,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Regression.p
 重新打包发行版（Windows，需要已安装 ps2exe，以及经校验的 FFmpeg 9.0.2 essentials 离线文件 `ffmpeg.exe`、`LICENSE`、`SOURCE.txt`）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.3.2 -EncoderDirectory C:\path\to\encoder
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.3.3 -EncoderDirectory C:\path\to\encoder
 ```
 
 产物写入 `release/`，包含 Windows 单文件 EXE、Windows ZIP、macOS TAR.GZ 和 SHA-256 校验文件；每个平台包内的 `VERSION` 记录版本及源码提交。EXE 内置程序资源，首次打开时自动释放到当前用户的版本目录，后续启动校验并修复缺失或损坏的资源。
+
+macOS 原生版在装有 Xcode 命令行工具的 Mac 上执行 `bash macos/build-macos.sh 1.4.0 release/macos`，生成包含 arm64 / x86_64 的通用 `.app`、ZIP 和独立校验清单。`.github/workflows/macos.yml` 在两种架构的 macOS runner 上分别构建、验证加密、合成画面编码、内存播放、更新校验与回滚。两端录像互通可用 `tests/Run-MacInteropRegression.ps1` 及 `macos/Tests/windows-interop.json` 公开测试样本验证。CI 验证不会捕获真实桌面或发送告警；真实屏幕授权与远控识别应在目标 Mac 上用测试录屏和实际会话核对。
 
 ## 已知限制
 

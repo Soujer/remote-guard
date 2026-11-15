@@ -14,6 +14,7 @@ enum SelfTests {
         try check(Vault.passwordError("Test12345678", "Test12345678") == nil, "Accept exactly twelve matching characters")
         try check(Vault.passwordError("Test12345678", "")!.contains("确认"), "Request missing confirmation")
         try check(Vault.passwordError("Test12345678", "test12345678")!.contains("不一致"), "Case-sensitive password confirmation")
+        try check(Vault.passwordError("Testé12345678", "Teste\u{301}12345678") != nil, "Compare the original password bytes without Unicode normalization")
         let input = Data("test-only cross-platform encrypted recording fixture".utf8)
         let recording = root.appendingPathComponent("test.rgrec")
         let writer = try RecordingWriter(recording, publicKey: publicKey, limit: 1_048_576); try writer.write(input); try writer.finish()
@@ -47,6 +48,19 @@ enum SelfTests {
         try check(MacUpdates.select([incomplete], current: "1.4.0") == nil, "Skip incomplete uploads")
         var foreign = release("2.0.0"), foreignAssets = foreign["assets"] as! [[String: String]]; foreignAssets[0]["browser_download_url"] = "https://example.com/foreign.zip"; foreign["assets"] = foreignAssets
         try check(MacUpdates.select([foreign], current: "1.4.0") == nil, "Reject package URLs outside the fixed Gitee repository")
+        let helper = root.appendingPathComponent("apply-update.sh")
+        let testScript = MacUpdates.installerScript.replacingOccurrences(of: "/bin/launchctl", with: "/usr/bin/true").replacingOccurrences(of: "/usr/bin/open", with: "/usr/bin/true")
+        try Data(testScript.utf8).write(to: helper)
+        for fail in [false, true] {
+            let caseRoot = root.appendingPathComponent(fail ? "rollback" : "install"); try ensureDirectory(caseRoot)
+            let installed = caseRoot.appendingPathComponent("installed.app"), staged = caseRoot.appendingPathComponent("staged.app"), backup = caseRoot.appendingPathComponent("backup.app")
+            try ensureDirectory(installed); try Data("old".utf8).write(to: installed.appendingPathComponent("version"))
+            if !fail { try ensureDirectory(staged); try Data("new".utf8).write(to: staged.appendingPathComponent("version")) }
+            let result = try runTool("/bin/bash", [helper.path, installed.path, staged.path, backup.path, "99999999", caseRoot.appendingPathComponent("none.plist").path, "gui/99999999"])
+            try check(result.code == (fail ? 1 : 0), "Update helper must report its transaction result")
+            let retained = try String(contentsOf: installed.appendingPathComponent("version"), encoding: .utf8)
+            try check(retained == (fail ? "old" : "new"), "Failed update must restore the previous application")
+        }
         if let package = ProcessInfo.processInfo.environment["GUARD_PACKAGE"] {
             let zip = URL(fileURLWithPath: package), bytes = try Data(contentsOf: zip)
             try check(try SafeZIP.entries(bytes).count == SafeZIP.files.count, "Validate every signed app package entry")
@@ -82,6 +96,13 @@ enum SelfTests {
         let output = ProcessInfo.processInfo.environment["GUARD_TEST_OUTPUT"].map { URL(fileURLWithPath: $0) }
         if let output {
             try ensureDirectory(output)
+            for (index, name) in [(2, "recording"), (3, "playback")] {
+                desktop.tabs.selectTabViewItem(at: index); desktop.window.contentView?.layoutSubtreeIfNeeded()
+                if let view = desktop.tabs.tabViewItem(at: index).view, let image = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
+                    view.cacheDisplay(in: view.bounds, to: image)
+                    if let png = image.representation(using: .png, properties: [:]) { try png.write(to: output.appendingPathComponent(name + ".png")) }
+                }
+            }
             let fixture: [String: String] = ["password": password, "key": try Data(contentsOf: key).base64EncodedString(), "recording": try Data(contentsOf: recording).base64EncodedString(), "plaintext": input.base64EncodedString(), "video": try Data(contentsOf: movie).base64EncodedString()]
             try JSONSerialization.data(withJSONObject: fixture, options: [.sortedKeys]).write(to: output.appendingPathComponent("macos-interop.json"))
         }

@@ -29,3 +29,4 @@ jobs:
             release/macos/remote-guard-macos-universal-v1.4.0.zip
             release/macos/SHA256SUMS-macos-v1.4.0.txt
             release/macos/tests/macos-interop.json
+            release/macos/tests/*.png

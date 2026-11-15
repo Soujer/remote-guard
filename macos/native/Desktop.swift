@@ -19,6 +19,8 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var available: MacUpdate?
     private let recorder = Recorder()
     private var movie: MemoryMovie?
+    private var playbackGeneration = 0
+    private var testRecordingUntil = Date.distantPast
     private var selectedRecording: URL?, selectedKey: URL?
     private var libraryFiles = [URL]()
     private var keyMonitor: Any?
@@ -29,7 +31,8 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let sessionsURL = supportRoot.appendingPathComponent("sessions.json")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        do { settings = try Settings.load() } catch { logGuard("配置读取失败：" + error.localizedDescription) }
+        do { settings = try Settings.load() } catch { footer.stringValue = "配置读取失败，原文件保留，请检查数据目录中的 settings.json"; logGuard("配置读取失败：" + error.localizedDescription) }
+        if !fm.fileExists(atPath: Settings.url.path) { importLegacyPush() }
         if let data = try? Data(contentsOf: sessionsURL), let saved = try? JSONDecoder().decode(SessionTracker.self, from: data) {
             tracker = saved; tracker.confirmed = tracker.confirmed.filter { Date().timeIntervalSince1970 - $0.value < 180 }; active = Set(tracker.confirmed.keys)
         }
@@ -53,7 +56,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool { showWindow(); return true }
     @objc func showWindow() { NSApp.setActivationPolicy(.regular); window.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     @objc func quitApp() { NSApp.terminate(nil) }
-    func windowShouldClose(_ sender: NSWindow) -> Bool { sender.orderOut(nil); NSApp.setActivationPolicy(.accessory); maybeInstall(); return false }
+    func windowShouldClose(_ sender: NSWindow) -> Bool { stopPlayback(); sender.orderOut(nil); NSApp.setActivationPolicy(.accessory); maybeInstall(); return false }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminating { return .terminateNow }; terminating = true; timer?.invalidate(); stopPlayback()
         recorder.stop { sender.reply(toApplicationShouldTerminate: true) }; return .terminateLater
@@ -78,9 +81,12 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let item = NSTabViewItem(identifier: name); item.label = name; let view = LayoutView(frame: NSRect(x: 0, y: 0, width: 900, height: 640)); item.view = view; tabs.addTabViewItem(item); return view
     }
     func buildWindow() {
-        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 800), styleMask: [.titled, .closable, .miniaturizable], backing: .buffered, defer: false)
+        let height = min(800, (NSScreen.main?.visibleFrame.height ?? 850) - 50)
+        window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: height), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.minSize = NSSize(width: 940, height: 600)
         window.title = "远程守护 · macOS"; window.center(); window.delegate = self; window.isReleasedWhenClosed = false
-        let root = LayoutView(frame: NSRect(x: 0, y: 0, width: 960, height: 800)); window.contentView = root
+        let root = LayoutView(frame: NSRect(x: 0, y: 0, width: 960, height: 800))
+        let scroll = NSScrollView(frame: NSRect(x: 0, y: 0, width: 960, height: height)); scroll.hasVerticalScroller = true; scroll.autohidesScrollers = true; scroll.documentView = root; scroll.autoresizingMask = [.width, .height]; window.contentView = scroll
         let heading = label("远程守护", root, 25, 18); heading.font = .boldSystemFont(ofSize: 24)
         tabs.frame = NSRect(x: 15, y: 65, width: 930, height: 675); root.addSubview(tabs)
         footer.frame = NSRect(x: 25, y: 755, width: 900, height: 30); root.addSubview(footer)
@@ -109,6 +115,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         label("已有密钥时可留空保存；导入 Windows 私钥时，在左侧输入其密码后点击“导入私钥”。", record, 25, 400, 840, 55)
         button("保存录屏设置", record, 25, 465, 180) { [weak self] in self?.saveRecording() }
         button("导入已有私钥", record, 230, 465, 180) { [weak self] in self?.importKey() }
+        button("测试录屏（5 秒）", record, 435, 465, 190) { [weak self] in self?.testRecording() }
         label("默认每 5 分钟分段、720p / 5 帧每秒 / 400 kbps，约 15 MB；默认上限 2 GB。\n私钥和密码丢失无法恢复录像，请另行备份。", record, 25, 535, 840, 65)
         library = NSComboBox(frame: NSRect(x: 25, y: 20, width: 640, height: 30)); library.isEditable = false; playback.addSubview(library)
         button("刷新", playback, 690, 16, 155) { [weak self] in self?.refreshLibrary() }
@@ -162,6 +169,27 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         loginStart.state = fm.fileExists(atPath: LaunchAgent.url.path) ? .on : .off
     }
+    private func importLegacyPush() {
+        for name in ["com.soujer.remote-guard", "com.soujer.remote-guard.instant"] {
+            let url = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents/" + name + ".plist")
+            guard let plist = NSDictionary(contentsOf: url) as? [String: Any], let arguments = plist["ProgramArguments"] as? [String], let path = arguments.first(where: { URL(fileURLWithPath: $0).lastPathComponent == "remote-guard-macos.sh" }) else { continue }
+            let config = URL(fileURLWithPath: path).deletingLastPathComponent().appendingPathComponent("push-channels.conf")
+            guard let bytes = try? Vault.readBounded(config, maximum: 65_536), let text = String(data: bytes, encoding: .utf8) else { continue }
+            var values = [String: String]()
+            for line in text.components(separatedBy: .newlines) {
+                let parts = line.split(separator: "=", maxSplits: 1).map { $0.trimmingCharacters(in: .whitespaces) }
+                guard parts.count == 2, ["ENABLED_CHANNELS", "BARK_KEY", "HAYO_TOKEN"].contains(parts[0]) else { continue }
+                var value = parts[1]
+                if (value.hasPrefix("\"") && value.hasSuffix("\"")) || (value.hasPrefix("'") && value.hasSuffix("'")) { value = String(value.dropFirst().dropLast()) }
+                // Parse literals only; never source or execute a user's shell configuration.
+                if value.contains("$(") || value.contains("`") { continue }; values[parts[0]] = value
+            }
+            let enabled = values["ENABLED_CHANNELS", default: ""].split(separator: " ")
+            if enabled.contains("bark") { settings.barkKey = values["BARK_KEY", default: ""] }
+            if enabled.contains("hayo") { settings.hayoToken = values["HAYO_TOKEN", default: ""] }
+            footer.stringValue = "已读取旧版推送配置；点击启动监控切换到新版"; return
+        }
+    }
     private func savePush() { attempt { settings.barkKey = bark.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); settings.hayoToken = hayo.stringValue.trimmingCharacters(in: .whitespacesAndNewlines); try settings.save(); footer.stringValue = "推送设置已保存" } }
     private func testPush() { savePush(); Notifications.send("远程守护测试", body: "推送通道测试", settings: settings) { [weak self] ok in self?.footer.stringValue = ok ? "测试推送已发送" : "推送失败，请检查 key / token 和网络" } }
     private func authorizeScreen() {
@@ -200,6 +228,20 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
             password.stringValue = ""; confirmation.stringValue = ""; footer.stringValue = "已导入公钥；原私钥文件保留，播放时仍需选择它"
         }
     }
+    private func testRecording() {
+        attempt {
+            try require(!requestedRecording, "录屏正在进行，无需另行测试")
+            try require(!settings.publicKey.isEmpty, "请先创建或导入播放私钥并保存录屏设置")
+            guard CGPreflightScreenCaptureAccess() else { authorizeScreen(); return }
+            testRecordingUntil = Date().addingTimeInterval(5); requestedRecording = true; recorder.start(settings)
+            footer.stringValue = "正在测试录屏，5 秒后结束；画面仅在本机加密保存"
+            DispatchQueue.main.asyncAfter(deadline: .now() + 5) {
+                self.testRecordingUntil = .distantPast
+                if self.active.isEmpty || !self.settings.recording { self.requestedRecording = false; self.recorder.stop { self.refreshLibrary() } }
+                self.footer.stringValue = "测试已结束，可到录像播放页选择片段验证"
+            }
+        }
+    }
     private func refreshLibrary() {
         libraryFiles = ((try? RecordingStorage.files(URL(fileURLWithPath: settings.directory))) ?? []).filter { $0.pathExtension == "rgrec" }.reversed()
         library.removeAllItems(); library.addItems(withObjectValues: libraryFiles.map { $0.lastPathComponent }); if !libraryFiles.isEmpty { library.selectItem(at: 0) }
@@ -210,12 +252,13 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         stopPlayback()
         guard let file = library.indexOfSelectedItem >= 0 ? libraryFiles[library.indexOfSelectedItem] : selectedRecording, let key = selectedKey else { footer.stringValue = "请选择录像和播放私钥"; return }
         let secret = playbackPassword.stringValue; playbackPassword.stringValue = ""; footer.stringValue = "正在验证和解锁录像……"
+        let request = playbackGeneration
         DispatchQueue.global(qos: .userInitiated).async {
-            do { let bytes = try Vault.decrypt(file, keyURL: key, password: secret); DispatchQueue.main.async { self.movie = MemoryMovie(bytes); self.playerView.player = AVPlayer(playerItem: AVPlayerItem(asset: self.movie!.asset)); self.playerView.player?.play(); self.footer.stringValue = "正在播放；双击画面可全屏，Esc 退出" } }
-            catch { DispatchQueue.main.async { self.footer.stringValue = "播放失败：" + error.localizedDescription } }
+            do { let bytes = try Vault.decrypt(file, keyURL: key, password: secret); DispatchQueue.main.async { guard request == self.playbackGeneration && !self.terminating else { return }; self.movie = MemoryMovie(bytes); self.playerView.player = AVPlayer(playerItem: AVPlayerItem(asset: self.movie!.asset)); self.playerView.player?.play(); self.footer.stringValue = "正在播放；双击画面可全屏，Esc 退出" } }
+            catch { DispatchQueue.main.async { if request == self.playbackGeneration { self.footer.stringValue = "播放失败：" + error.localizedDescription } } }
         }
     }
-    private func stopPlayback() { if playerView.isInFullScreenMode { playerView.exitFullScreenMode(options: nil) }; playerView.player?.pause(); playerView.player?.replaceCurrentItem(with: nil); playerView.player = nil; movie = nil }
+    private func stopPlayback() { playbackGeneration += 1; if playerView.isInFullScreenMode { playerView.exitFullScreenMode(options: nil) }; playerView.player?.pause(); playerView.player?.replaceCurrentItem(with: nil); playerView.player = nil; movie = nil }
     @objc private func toggleFullScreen() { if playerView.isInFullScreenMode { playerView.exitFullScreenMode(options: nil) } else if let screen = window.screen ?? NSScreen.main { playerView.enterFullScreenMode(screen, withOptions: [.fullScreenModeAllScreens: false]) } }
     private func saveAutoUpdate() { attempt { settings.autoUpdate = autoUpdate.state == .on; try settings.save(); footer.stringValue = "自动更新偏好已保存" } }
     private func checkUpdates() {
@@ -251,7 +294,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 for name in previous.subtracting(self.active) { Notifications.send(name + " 已断开", body: "已断开", settings: self.settings) { _ in } }
                 if let data = try? JSONEncoder().encode(self.tracker) { try? data.write(to: self.sessionsURL, options: .atomic) }
                 if self.settings.recording && !self.active.isEmpty && !self.requestedRecording && Date() >= self.nextRecordingRetry { self.requestedRecording = true; self.recorder.start(self.settings) }
-                if (self.active.isEmpty || !self.settings.recording) && self.requestedRecording { self.requestedRecording = false; self.recorder.stop() }
+                if (self.active.isEmpty || !self.settings.recording) && self.requestedRecording && Date() >= self.testRecordingUntil { self.requestedRecording = false; self.recorder.stop() }
                 self.refreshStatus()
             }
         }

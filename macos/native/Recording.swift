@@ -103,7 +103,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
                         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: self.queue); self.stream = stream
                         stream.startCapture { error in self.queue.async {
                             guard request == self.generation else { return }
-                            if let error { self.report("录屏启动失败：" + error.localizedDescription, false); self.stop(); return }
+                            if let error { self.stop(reason: "录屏启动失败：" + error.localizedDescription); return }
                             let timer = DispatchSource.makeTimerSource(queue: self.queue); timer.schedule(deadline: .now(), repeating: .milliseconds(200)); timer.setEventHandler { self.tick() }; self.timer = timer; timer.resume()
                             self.report("加密录屏进行中（主显示器，无声音）", true)
                         } }
@@ -116,7 +116,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         guard type == .screen, CMSampleBufferIsValid(sampleBuffer), let pixel = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
         latest = pixel
     }
-    func stream(_ stream: SCStream, didStopWithError error: Error) { report("屏幕采集停止：" + error.localizedDescription, false); stop() }
+    func stream(_ stream: SCStream, didStopWithError error: Error) { stop(reason: "屏幕采集停止：" + error.localizedDescription) }
     private func tick() {
         guard let latest else { return }
         do {
@@ -130,19 +130,20 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
             let free = (try fm.attributesOfFileSystem(forPath: settings.directory)[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
             try require(free > 512 * 1_048_576, "磁盘空间不足，已停止录屏")
             try encoder?.append(latest, at: Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9)
-        } catch { report("录屏停止：" + error.localizedDescription, false); stop() }
+        } catch { stop(reason: "录屏停止：" + error.localizedDescription) }
     }
     private func closeSegment() throws {
         guard let encoder else { return }; defer { self.encoder = nil; partial = nil }
         try encoder.finish()
         if let partial { try fm.moveItem(at: partial, to: partial.deletingPathExtension()); logGuard("加密片段已保存：" + partial.deletingPathExtension().lastPathComponent) }
     }
-    func stop(_ completion: (() -> Void)? = nil) {
+    func stop(reason: String = "加密录屏待命", _ completion: (() -> Void)? = nil) {
         queue.async {
             self.generation += 1; self.starting = false; self.timer?.cancel(); self.timer = nil
             let stream = self.stream; self.stream = nil; stream?.stopCapture { _ in }
-            do { try self.closeSegment() } catch { logGuard("片段未完成：" + error.localizedDescription) }
-            self.latest = nil; DispatchQueue.main.async { self.onStatus?("加密录屏待命", false); completion?() }
+            var status = reason
+            do { try self.closeSegment() } catch { status = "片段未完成：" + error.localizedDescription }
+            logGuard(status); self.latest = nil; DispatchQueue.main.async { self.onStatus?(status, false); completion?() }
         }
     }
 }

@@ -70,21 +70,17 @@ enum MacUpdates {
             return app
         } catch { try? fm.removeItem(at: cache); throw error }
     }
-    static func install(_ staged: URL) throws {
-        let installed = Bundle.main.bundleURL.resolvingSymlinksInPath()
-        try require(installed.pathExtension == "app" && !installed.path.contains("AppTranslocation") && fm.isWritableFile(atPath: installed.deletingLastPathComponent().path), "请先将软件放到本用户的“应用程序”文件夹再更新")
-        let backupRoot = supportRoot.appendingPathComponent("backups", isDirectory: true); try ensureDirectory(backupRoot)
-        let backup = backupRoot.appendingPathComponent("RemoteGuard-" + UUID().uuidString + ".app")
-        let helper = staged.deletingLastPathComponent().appendingPathComponent("apply-update.sh")
-        // All paths are positional arguments, never interpolated as shell code.
-        let script = #"""
+    // All paths are positional arguments, never interpolated as shell code.
+    static let installerScript = #"""
 #!/bin/bash
 set -eu
 installed="$1"; staged="$2"; backup="$3"; oldpid="$4"; agent="$5"; userdomain="$6"
-while kill -0 "$oldpid" 2>/dev/null; do sleep 1; done
+for attempt in {1..30}; do if ! kill -0 "$oldpid" 2>/dev/null; then break; fi; sleep 1; done
+if kill -0 "$oldpid" 2>/dev/null; then exit 1; fi
 /bin/launchctl bootout "$userdomain/com.soujer.remote-guard.desktop" 2>/dev/null || true
 if ! /bin/mv "$installed" "$backup"; then /usr/bin/open "$installed"; exit 1; fi
 if ! /bin/mv "$staged" "$installed"; then
+    if [ -e "$installed" ]; then /bin/mv "$installed" "$staged.failed"; fi
     /bin/mv "$backup" "$installed"
     /usr/bin/open "$installed"
     exit 1
@@ -92,7 +88,13 @@ fi
 if [ -f "$agent" ]; then /bin/launchctl bootstrap "$userdomain" "$agent" 2>/dev/null || true; fi
 /usr/bin/open "$installed"
 """#
-        try Data(script.utf8).write(to: helper)
+    static func install(_ staged: URL) throws {
+        let installed = Bundle.main.bundleURL.resolvingSymlinksInPath()
+        try require(installed.pathExtension == "app" && !installed.path.contains("AppTranslocation") && fm.isWritableFile(atPath: installed.deletingLastPathComponent().path), "请先将软件放到本用户的“应用程序”文件夹再更新")
+        let backupRoot = supportRoot.appendingPathComponent("backups", isDirectory: true); try ensureDirectory(backupRoot)
+        let backup = backupRoot.appendingPathComponent("RemoteGuard-" + UUID().uuidString + ".app")
+        let helper = staged.deletingLastPathComponent().appendingPathComponent("apply-update.sh")
+        try Data(installerScript.utf8).write(to: helper)
         let process = Process(); process.executableURL = URL(fileURLWithPath: "/bin/bash"); process.arguments = [helper.path, installed.path, staged.path, backup.path, String(getpid()), LaunchAgent.url.path, "gui/\(getuid())"]
         process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice; try process.run()
     }

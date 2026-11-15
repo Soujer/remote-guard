@@ -21,3 +21,6 @@ updates.json
 recording.stop
 updating.flag
 update-cache/
+push-channels.conf
+state-macos.conf
+state-macos.conf.tmp

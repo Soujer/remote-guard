@@ -112,6 +112,14 @@ final class KeyXML: NSObject, XMLParserDelegate {
     }
 }
 enum Vault {
+    static func readBounded(_ url: URL, maximum: Int) throws -> Data {
+        let file = try FileHandle(forReadingFrom: url); defer { try? file.close() }
+        var bytes = Data()
+        while let chunk = try file.read(upToCount: min(65_536, maximum + 1 - bytes.count)), !chunk.isEmpty {
+            bytes.append(chunk); try require(bytes.count <= maximum, "文件超过大小限制")
+        }
+        return bytes
+    }
     static func random(_ count: Int) throws -> Data { var data = Data(count: count); let result = data.withUnsafeMutableBytes { SecRandomCopyBytes(kSecRandomDefault, count, $0.baseAddress!) }; try require(result == errSecSuccess, "系统随机数生成失败"); return data }
     static func equal(_ a: Data, _ b: Data) -> Bool { var diff = a.count ^ b.count; for (x, y) in zip(a, b) { diff |= Int(x ^ y) }; return diff == 0 }
     static func sha(_ data: Data) -> String { var digest = [UInt8](repeating: 0, count: 32); data.withUnsafeBytes { _ = CC_SHA256($0.baseAddress, CC_LONG(data.count), &digest) }; return digest.map { String(format: "%02x", $0) }.joined() }
@@ -132,7 +140,7 @@ enum Vault {
         if password.isEmpty { return "请输入私钥密码（至少 12 位）" }
         if password.utf16.count < 12 { return "私钥密码不足 12 位，当前为 \(password.utf16.count) 位" }
         if confirmation.isEmpty { return "请再次输入确认密码" }
-        if password != confirmation { return "两次输入的密码不一致" }; return nil
+        if Data(password.utf8) != Data(confirmation.utf8) { return "两次输入的密码不一致" }; return nil
     }
     static func createKey(_ url: URL, password: String) throws -> String {
         try require(password.utf16.count >= 12, "私钥密码至少 12 位")
@@ -149,7 +157,7 @@ enum Vault {
     static func readKey(_ url: URL, password: String) throws -> SecKey {
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         try require((88...1_048_576).contains(size), "私钥文件格式无效")
-        let data = try Data(contentsOf: url); try require(data.prefix(8) == Data("RGKEY001".utf8), "不支持的私钥格式")
+        let data = try readBounded(url, maximum: 1_048_576); try require(data.count >= 88 && data.prefix(8) == Data("RGKEY001".utf8), "不支持的私钥格式")
         let material = try derive(password, salt: data.subdata(in: 8..<24))
         try require(equal(hmac(data.subdata(in: 0..<(data.count - 32)), key: material.subdata(in: 32..<64)), Data(data.suffix(32))), "私钥密码错误或文件已损坏")
         let xml = try crypt(data.subdata(in: 40..<(data.count - 32)), key: material.subdata(in: 0..<32), iv: data.subdata(in: 24..<40), encrypt: false)
@@ -158,7 +166,8 @@ enum Vault {
     static func decrypt(_ url: URL, keyURL: URL, password: String) throws -> Data {
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
         try require((320...268_435_456).contains(size), "录像大小无效或超过单段 256 MB 限制")
-        let data = try Data(contentsOf: url)
+        let data = try readBounded(url, maximum: 268_435_456)
+        try require(data.count >= 320, "录像已截断")
         try require(data.prefix(8) == Data("RGREC001".utf8), "不支持的录像格式")
         let length = Int(data[8]) | Int(data[9]) << 8 | Int(data[10]) << 16 | Int(data[11]) << 24
         let start = 12 + length + 16
