@@ -112,7 +112,7 @@ function New-GuardLibraryView($Parent,$RootBox) {
     $view.RestoreFullScreen={
         if(-not $view.FullScreen){return}
         $full=$view.FullScreen;$view.FullScreen=$null
-        $view.Picture.Dock='None';$view.EmbeddedParent.Controls.Add($view.Picture);$view.Picture.Bounds=$view.EmbeddedBounds
+        $view.Picture.Dock='None';$view.Picture.Anchor='Top, Left';$view.EmbeddedParent.Controls.Add($view.Picture);$view.Picture.Bounds=$view.EmbeddedBounds
         $view.Transport.Dock='None';$view.EmbeddedParent.Controls.Add($view.Transport);$view.Transport.Bounds=$view.TransportBounds
         $view.ExitButton=$null
         $full.Dispose()
@@ -127,7 +127,7 @@ function New-GuardLibraryView($Parent,$RootBox) {
         $full=New-Object Windows.Forms.Form;$full.Text='录像播放';$full.FormBorderStyle='None';$full.BackColor='Black';$full.ForeColor='White';$full.KeyPreview=$true
         $full.StartPosition='Manual';$full.Bounds=[Windows.Forms.Screen]::FromControl($view.Picture).Bounds
         $view.EmbeddedBounds=$view.Picture.Bounds;$view.TransportBounds=$view.Transport.Bounds;$view.FullScreen=$full
-        $view.Picture.Dock='Fill';$full.Controls.Add($view.Picture)
+        $view.Picture.Dock='None';$view.Picture.Anchor='Top, Bottom, Left, Right';$view.Picture.SetBounds(0,50,$full.ClientSize.Width,($full.ClientSize.Height-140));$full.Controls.Add($view.Picture)
         $view.Transport.Dock='Bottom';$full.Controls.Add($view.Transport);$view.Transport.BringToFront()
         $header=New-Object Windows.Forms.Panel;$header.Height=50;$header.BackColor='Black';$header.Dock='Top';$full.Controls.Add($header);$header.BringToFront()
         $exit=New-Object Windows.Forms.Button;$exit.Text='退出全屏（Esc）';$exit.BackColor='WhiteSmoke';$exit.ForeColor='Black';$exit.UseVisualStyleBackColor=$false;$exit.FlatStyle='Standard'

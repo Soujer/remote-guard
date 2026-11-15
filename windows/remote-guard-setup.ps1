@@ -544,7 +544,7 @@ if($SmokeTest){
     & $libraryView.RefreshAction
     $originalBounds=$libraryView.Picture.Bounds
     & $libraryView.ToggleFullScreen $false
-    if(-not $libraryView.FullScreen -or $libraryView.Picture.Parent -ne $libraryView.FullScreen -or $libraryView.Picture.Dock -ne 'Fill'){throw 'Fullscreen must reuse the existing playback surface'}
+    if(-not $libraryView.FullScreen -or $libraryView.Picture.Parent -ne $libraryView.FullScreen -or $libraryView.Picture.Top -lt 50 -or $libraryView.Picture.Bottom -gt $libraryView.Transport.Top){throw 'Fullscreen must preserve the video without covering it with transport controls'}
     & $libraryView.FullScreenKeyAction $libraryView.FullScreen ([Windows.Forms.KeyEventArgs]::new([Windows.Forms.Keys]::Escape))
     if($libraryView.FullScreen -or $libraryView.Picture.Parent -ne $tabLibrary -or $libraryView.Picture.Bounds -ne $originalBounds -or $libraryView.Picture.IsDisposed){throw 'Escape must restore the embedded playback surface'}
     & $libraryView.ToggleFullScreen $false
