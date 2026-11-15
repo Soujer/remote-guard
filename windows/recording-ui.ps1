@@ -73,7 +73,8 @@ function New-GuardRecordingView($Parent,$RootBox,[string]$Resources) {
 }
 
 function New-GuardLibraryView($Parent,$RootBox) {
-    $view=[pscustomobject]@{Root=$RootBox;Player=$null;Picture=$null;List=$null;Key=$null;Password=$null;Status=$null;Timer=$null}
+    # Event handlers run in their own closure module. Capture helper scriptblocks explicitly.
+    $view=[pscustomobject]@{Root=$RootBox;Player=$null;Picture=$null;List=$null;Key=$null;Password=$null;Status=$null;Timer=$null;Stop=${function:Stop-GuardPreview};Refresh=${function:Refresh-GuardLibrary};GetFiles=${function:Get-GuardRecordingFiles};RefreshAction=$null;StopAction=$null}
     $view.List=New-Object Windows.Forms.ListView;$view.List.View='Details';$view.List.FullRowSelect=$true;$view.List.MultiSelect=$false;$view.List.SetBounds(20,15,780,135)
     [void]$view.List.Columns.Add('录像时间（本机）',185);[void]$view.List.Columns.Add('大小',90);[void]$view.List.Columns.Add('文件名',485);$Parent.Controls.Add($view.List)
     $refresh=New-Object Windows.Forms.Button;$refresh.Text='刷新';$refresh.SetBounds(20,160,85,30);$Parent.Controls.Add($refresh)
@@ -86,16 +87,18 @@ function New-GuardLibraryView($Parent,$RootBox) {
     $stop=New-Object Windows.Forms.Button;$stop.Text='停止播放';$stop.SetBounds(650,200,150,32);$Parent.Controls.Add($stop)
     $view.Picture=New-Object Windows.Forms.PictureBox;$view.Picture.BackColor='Black';$view.Picture.SizeMode='Zoom';$view.Picture.SetBounds(90,245,640,300);$Parent.Controls.Add($view.Picture)
     $view.Status=New-Object Windows.Forms.Label;$view.Status.SetBounds(20,555,780,35);$view.Status.Text='选择录像、私钥并输入密码，在当前窗口播放。';$Parent.Controls.Add($view.Status)
-    $refresh.Add_Click({Refresh-GuardLibrary $view}.GetNewClosure())
+    $view.RefreshAction={& $view.Refresh $view}.GetNewClosure()
+    $refresh.Add_Click($view.RefreshAction)
     $openFile.Add_Click({
         $d=New-Object Windows.Forms.OpenFileDialog;$d.Filter='加密录像 (*.rgrec)|*.rgrec'
         try{if($d.ShowDialog() -eq 'OK'){$file=Get-Item -LiteralPath $d.FileName;$item=New-Object Windows.Forms.ListViewItem($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'));[void]$item.SubItems.Add(('{0:N1} MB' -f ($file.Length/1MB)));[void]$item.SubItems.Add($file.Name);$item.Tag=$file.FullName;[void]$view.List.Items.Add($item);$item.Selected=$true}}finally{$d.Dispose()}
     }.GetNewClosure())
     $keyBrowse.Add_Click({$d=New-Object Windows.Forms.OpenFileDialog;$d.Filter='播放私钥 (*.rgkey)|*.rgkey';try{if($d.ShowDialog() -eq 'OK'){$view.Key.Text=$d.FileName}}finally{$d.Dispose()}}.GetNewClosure())
-    $stop.Add_Click({Stop-GuardPreview $view;$view.Status.Text='播放已停止。'}.GetNewClosure())
+    $view.StopAction={& $view.Stop $view;$view.Status.Text='播放已停止。'}.GetNewClosure()
+    $stop.Add_Click($view.StopAction)
     $play.Add_Click({
         try {
-            Stop-GuardPreview $view
+            & $view.Stop $view
             if($view.List.SelectedItems.Count -ne 1){throw '请先选择录像'}
             if(-not(Test-Path -LiteralPath $view.Key.Text -PathType Leaf)){throw '请选择播放私钥'}
             $encoder=Join-Path $view.Root.Text 'ffmpeg\ffmpeg.exe'
@@ -117,8 +120,8 @@ function New-GuardLibraryView($Parent,$RootBox) {
                 try{[Runtime.InteropServices.Marshal]::Copy($frame,0,$data.Scan0,$frame.Length)}finally{$bitmap.UnlockBits($data)}
                 $old=$view.Picture.Image;$view.Picture.Image=$bitmap;if($old){$old.Dispose()};$view.Status.Text='正在播放（5 帧/秒，无声音）。'
             }
-            if($view.Player.Done){$errorText=$view.Player.Error;Stop-GuardPreview $view;$view.Status.Text=if($errorText){'播放失败: '+$errorText}else{'播放结束。'}}
-        }catch{Stop-GuardPreview $view;$view.Status.Text='播放失败: '+$_.Exception.Message}
+            if($view.Player.Done){$errorText=$view.Player.Error;& $view.Stop $view;$view.Status.Text=if($errorText){'播放失败: '+$errorText}else{'播放结束。'}}
+        }catch{& $view.Stop $view;$view.Status.Text='播放失败: '+$_.Exception.Message}
     }.GetNewClosure())
     return $view
 }
@@ -133,7 +136,7 @@ function Refresh-GuardLibrary($View) {
     try {
         $cfg=Get-Content -LiteralPath (Join-Path $View.Root.Text 'recording.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
         if(-not(Test-Path -LiteralPath $cfg.directory)){return}
-        foreach($file in @(Get-GuardRecordingFiles $cfg.directory | Where-Object Extension -eq '.rgrec' | Sort-Object LastWriteTimeUtc -Descending)) {
+        foreach($file in @(& $View.GetFiles $cfg.directory | Where-Object Extension -eq '.rgrec' | Sort-Object LastWriteTimeUtc -Descending)) {
             $item=New-Object Windows.Forms.ListViewItem($file.LastWriteTime.ToString('yyyy-MM-dd HH:mm:ss'));[void]$item.SubItems.Add(('{0:N1} MB' -f ($file.Length/1MB)));[void]$item.SubItems.Add($file.Name);$item.Tag=$file.FullName;[void]$View.List.Items.Add($item)
         }
     }catch{$View.Status.Text='尚无可读取的录像，请先配置录屏。'}

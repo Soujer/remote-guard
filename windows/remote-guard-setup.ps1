@@ -531,6 +531,8 @@ $form.Add_FormClosed({
     }
 })
 if($SmokeTest){
+    & $libraryView.RefreshAction
+    & $libraryView.StopAction
     $result=[pscustomobject]@{Tabs=@($tabs.TabPages|ForEach-Object Text);RecordingEmbedded=($recordingView.Enabled.Parent -eq $tabRecording);PlayerEmbedded=($libraryView.Picture.Parent -eq $tabLibrary);UpdaterPresent=($checkUpdate.Parent -eq $tabUpdate)}|ConvertTo-Json
     if($script:GuardEmbeddedPayload){[void][IO.Directory]::CreateDirectory($InstallRoot);[IO.File]::WriteAllText((Join-Path $InstallRoot 'desktop-smoke.json'),$result)}else{Write-Output $result}
     $form.Dispose();$statusTimer.Dispose();$libraryView.Timer.Dispose();return
