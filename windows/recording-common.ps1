@@ -3,6 +3,8 @@ function Get-GuardRecordingConfig([string]$Directory) {
     $path = Join-Path $Directory 'recording.json'
     if (-not (Test-Path -LiteralPath $path)) { return $null }
     $cfg = Get-Content -LiteralPath $path -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+    # Upgrade the previous stock profile; preserve deliberate custom encoding settings.
+    if ($cfg.width -eq 1280 -and $cfg.bitrateKbps -eq 400) { $cfg.width=1920; $cfg.bitrateKbps=1000 }
     if (-not $cfg.enabled) { return $null }
     if ($cfg.schema -ne 1) { throw '不支持的录屏配置版本' }
     if (-not [IO.Path]::IsPathRooted([string]$cfg.directory) -or [string]$cfg.directory -notmatch '^[A-Za-z]:\\') { throw '请选择本机磁盘上的录像目录' }
@@ -54,7 +56,23 @@ function Get-GuardRecordingFiles([string]$Directory) {
 
 function Get-GuardRecordingArguments($Config) {
     $filter = 'scale=w=min(' + [int]$Config.width + '\,iw):h=min(' + [int]([math]::Floor($Config.width * 9 / 16)) + '\,ih):force_original_aspect_ratio=decrease,pad=ceil(iw/2)*2:ceil(ih/2)*2'
-    return '-hide_banner -loglevel error -f gdigrab -framerate ' + [int]$Config.fps + ' -draw_mouse 1 -i desktop -an -vf "' + $filter + '" -c:v libx264 -preset veryfast -pix_fmt yuv420p -b:v ' + [int]$Config.bitrateKbps + 'k -maxrate ' + [int]$Config.bitrateKbps + 'k -bufsize ' + ([int]$Config.bitrateKbps * 2) + 'k -g ' + ([int]$Config.fps * 2) + ' -threads 2 -t ' + [int]$Config.segmentSeconds + ' -movflags +frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1'
+    return '-hide_banner -loglevel error -nostats -progress pipe:2 -f gdigrab -framerate ' + [int]$Config.fps + ' -draw_mouse 1 -i desktop -an -vf "' + $filter + '" -c:v libx264 -bf 0 -preset veryfast -pix_fmt yuv420p -b:v ' + [int]$Config.bitrateKbps + 'k -maxrate ' + [int]$Config.bitrateKbps + 'k -bufsize ' + ([int]$Config.bitrateKbps * 2) + 'k -g ' + ([int]$Config.fps * 2) + ' -threads 2 -t ' + [int]$Config.segmentSeconds + ' -movflags +frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1'
+}
+
+function Get-GuardRecordingDuration([string]$Path) {
+    try {
+        $file=Get-Item -LiteralPath $Path -ErrorAction Stop
+        $metadata=Get-Content -LiteralPath ($Path+'.meta.json') -Raw -Encoding UTF8 -ErrorAction Stop | ConvertFrom-Json
+        if($metadata.schema -eq 1 -and $metadata.bytes -eq $file.Length -and $metadata.durationSeconds -gt 0 -and $metadata.durationSeconds -le 86400){return [double]$metadata.durationSeconds}
+    }catch{ }
+    return $null
+}
+
+function Set-GuardRecordingDuration([string]$Path,[double]$Seconds) {
+    if([double]::IsNaN($Seconds) -or [double]::IsInfinity($Seconds) -or $Seconds -le 0 -or $Seconds -gt 86400){return}
+    $metadata=[pscustomobject]@{schema=1;durationSeconds=$Seconds;bytes=(Get-Item -LiteralPath $Path -ErrorAction Stop).Length}
+    $metadata|ConvertTo-Json|Set-Content -LiteralPath ($Path+'.meta.json.tmp') -Encoding UTF8
+    Move-Item -LiteralPath ($Path+'.meta.json.tmp') -Destination ($Path+'.meta.json') -Force
 }
 
 function Limit-GuardRecordingStorage($Config, [long]$ReserveBytes) {
@@ -65,6 +83,7 @@ function Limit-GuardRecordingStorage($Config, [long]$ReserveBytes) {
     foreach ($file in $files) {
         if ($total + $ReserveBytes -le $limit) { break }
         Remove-Item -LiteralPath $file.FullName -ErrorAction Stop
+        Remove-Item -LiteralPath ($file.FullName+'.meta.json') -ErrorAction SilentlyContinue
         $total -= $file.Length
     }
     $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($Config.directory))

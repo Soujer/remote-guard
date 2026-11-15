@@ -9,7 +9,11 @@ final class LayoutView: NSView {
     override var isOpaque: Bool { true }
     override func draw(_ dirtyRect: NSRect) { NSColor.windowBackgroundColor.setFill(); dirtyRect.fill(); super.draw(dirtyRect) }
 }
-final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
+final class SeekSlider: NSSlider {
+    var isDragging = false
+    override func mouseDown(with event: NSEvent) { isDragging = true; defer { isDragging = false }; super.mouseDown(with: event) }
+}
+final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     var settings = Settings()
     var window: NSWindow!
     let tabs = NSTabView(), playerView = AVPlayerView()
@@ -33,7 +37,14 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private let monitorStatus = NSTextField(labelWithString: ""), recordingStatus = NSTextField(labelWithString: ""), updateStatus = NSTextField(labelWithString: ""), footer = NSTextField(labelWithString: "就绪")
     private var recordingEnabled: NSButton!, autoUpdate: NSButton!, loginStart: NSButton!
     private var folder: NSTextField!, quota: NSTextField!, password: NSTextField!, confirmation: NSTextField!, bark: NSTextField!, hayo: NSTextField!, playbackPassword: NSTextField!
-    private var library: NSComboBox!, keyLabel: NSTextField!, installUpdate: NSButton!
+    private var library: NSTableView!, keyLabel: NSTextField!, installUpdate: NSButton!
+    let playbackSurface = LayoutView()
+    let timeline = SeekSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    let speed = NSPopUpButton(), playbackClock = NSTextField(labelWithString: "00:00:00 / --:--:--")
+    private var playbackTimer: Timer?, pauseButton: NSButton!
+    private var playingFile: URL?, durationSaved = false
+    private var seekGeneration = 0, wantsPlayback = false
+    private var playbackSpeed: Float { [0.5, 1, 1.5, 2, 3, 4][max(0, speed.indexOfSelectedItem)] }
     private let sessionsURL = supportRoot.appendingPathComponent("sessions.json")
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -52,7 +63,7 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
             if !running { self.requestedRecording = false; self.nextRecordingRetry = Date().addingTimeInterval(60) }
         }
         keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            if event.keyCode == 53, self?.playerView.isInFullScreenMode == true { self?.playerView.exitFullScreenMode(options: nil); return nil }; return event
+            if event.keyCode == 53, self?.playbackSurface.isInFullScreenMode == true { self?.playbackSurface.exitFullScreenMode(options: nil); return nil }; return event
         }
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in self?.tick() }
         nextUpdateCheck = Date().addingTimeInterval(10)
@@ -127,19 +138,34 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
         button("保存录屏设置", record, 25, 465, 180) { [weak self] in self?.saveRecording() }
         button("导入已有私钥", record, 230, 465, 180) { [weak self] in self?.importKey() }
         button("测试录屏（5 秒）", record, 435, 465, 190) { [weak self] in self?.testRecording() }
-        label("默认每 5 分钟分段、720p / 5 帧每秒 / 400 kbps，约 15 MB；默认上限 2 GB。\n私钥和密码丢失无法恢复录像，请另行备份。", record, 25, 535, 840, 65)
-        library = NSComboBox(frame: NSRect(x: 25, y: 20, width: 640, height: 30)); library.isEditable = false; playback.addSubview(library)
-        button("刷新", playback, 690, 16, 155) { [weak self] in self?.refreshLibrary() }
-        button("打开其他录像", playback, 25, 65, 180) { [weak self] in self?.chooseRecording() }
-        button("选择私钥", playback, 225, 65, 160) { [weak self] in self?.choosePlaybackKey() }
-        keyLabel = label("请选择播放私钥", playback, 405, 73, 440)
-        label("私钥密码", playback, 25, 125, 100); playbackPassword = field("", playback, 125, 120, 330, secure: true)
-        button("播放", playback, 475, 116, 110) { [weak self] in self?.play() }
-        button("停止", playback, 595, 116, 110) { [weak self] in self?.stopPlayback() }
-        button("全屏", playback, 725, 116, 120) { [weak self] in self?.toggleFullScreen() }
-        playerView.frame = NSRect(x: 25, y: 175, width: 820, height: 395); playerView.controlsStyle = .inline; playerView.showsFullScreenToggleButton = true; playerView.showsSharingServiceButton = false; playback.addSubview(playerView)
+        label("最高 1080p / 5 帧每秒 / 1 Mbps；每 5 分钟约 37.5 MB，2 GB 约 4.5～4.8 小时。\n私钥和密码丢失无法恢复录像，请另行备份。", record, 25, 535, 840, 65)
+        library = NSTableView(); library.delegate = self; library.dataSource = self; library.rowHeight = 25
+        for (identifier, title, width) in [("file", "录像文件", 640.0), ("duration", "时长", 150.0)] {
+            let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(identifier)); column.title = title; column.width = width; library.addTableColumn(column)
+        }
+        let libraryScroll = NSScrollView(frame: NSRect(x: 25, y: 15, width: 820, height: 115)); libraryScroll.hasVerticalScroller = true; libraryScroll.documentView = library; playback.addSubview(libraryScroll)
+        button("刷新", playback, 25, 140, 110) { [weak self] in self?.refreshLibrary() }
+        button("打开其他录像", playback, 150, 140, 170) { [weak self] in self?.chooseRecording() }
+        button("选择私钥", playback, 340, 140, 150) { [weak self] in self?.choosePlaybackKey() }
+        keyLabel = label("请选择播放私钥", playback, 510, 148, 330)
+        label("私钥密码", playback, 25, 195, 100); playbackPassword = field("", playback, 125, 190, 330, secure: true)
+        button("播放", playback, 475, 186, 110) { [weak self] in self?.play() }
+        button("停止", playback, 595, 186, 110) { [weak self] in self?.stopPlayback() }
+        button("全屏", playback, 725, 186, 120) { [weak self] in self?.toggleFullScreen() }
+        playbackSurface.frame = NSRect(x: 25, y: 235, width: 820, height: 355); playback.addSubview(playbackSurface)
+        playerView.frame = NSRect(x: 0, y: 0, width: 820, height: 265); playerView.autoresizingMask = [.width, .height]
+        playerView.controlsStyle = .none; playerView.showsFullScreenToggleButton = false; playerView.showsSharingServiceButton = false; playbackSurface.addSubview(playerView)
+        let transport = LayoutView(frame: NSRect(x: 0, y: 265, width: 820, height: 90)); transport.autoresizingMask = [.width, .minYMargin]; playbackSurface.addSubview(transport)
+        timeline.frame = NSRect(x: 10, y: 3, width: 800, height: 30); timeline.autoresizingMask = [.width]; timeline.target = self; timeline.action = #selector(scrub(_:)); timeline.isContinuous = false; timeline.isEnabled = false; transport.addSubview(timeline)
+        button("后退 10 秒", transport, 5, 43, 105) { [weak self] in self?.skip(-10) }
+        pauseButton = button("暂停", transport, 115, 43, 80) { [weak self] in self?.togglePause() }
+        button("快进 10 秒", transport, 200, 43, 105) { [weak self] in self?.skip(10) }
+        speed.frame = NSRect(x: 315, y: 47, width: 85, height: 28); speed.addItems(withTitles: ["0.5x", "1x", "1.5x", "2x", "3x", "4x"]); speed.selectItem(at: 1); speed.target = self; speed.action = #selector(changeSpeed); transport.addSubview(speed)
+        playbackClock.frame = NSRect(x: 410, y: 52, width: 225, height: 25); transport.addSubview(playbackClock)
+        button("切换全屏", transport, 665, 43, 145) { [weak self] in self?.toggleFullScreen() }
         let doubleClick = NSClickGestureRecognizer(target: self, action: #selector(toggleFullScreen)); doubleClick.numberOfClicksRequired = 2; playerView.addGestureRecognizer(doubleClick)
-        label("双击画面或点击全屏按钮，Esc 退出。验证和解密在本机内存完成，不生成明文视频。", playback, 25, 590, 840, 45)
+        label("拖动进度、快进或选择倍速；双击切换全屏，Esc 退出。录像只在内存中解锁。", playback, 25, 605, 840, 35)
+        playbackTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.refreshPlayback() }
         label("当前版本 v" + MacUpdates.current + " · Apple 芯片 / Intel 通用版 · 更新来源 Gitee", update, 25, 30)
         autoUpdate = checkBox("自动检查并安装正式版更新（每 6 小时，软件空闲且窗口关闭后安装）", settings.autoUpdate, update, 95) { [weak self] in self?.saveAutoUpdate() }
         button("检查更新", update, 25, 165) { [weak self] in self?.checkUpdates() }
@@ -256,22 +282,52 @@ final class GuardDesktop: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private func refreshLibrary() {
         libraryFiles = ((try? RecordingStorage.files(URL(fileURLWithPath: settings.directory))) ?? []).filter { $0.pathExtension == "rgrec" }.reversed()
-        library.removeAllItems(); library.addItems(withObjectValues: libraryFiles.map { $0.lastPathComponent }); if !libraryFiles.isEmpty { library.selectItem(at: 0) }
+        library.reloadData(); if !libraryFiles.isEmpty { library.selectRowIndexes(IndexSet(integer: 0), byExtendingSelection: false) }
     }
-    private func chooseRecording() { let panel = NSOpenPanel(); panel.allowedFileTypes = ["rgrec"]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK, let url = panel.url { selectedRecording = url; if library.indexOfSelectedItem >= 0 { library.deselectItem(at: library.indexOfSelectedItem) }; footer.stringValue = "已选择录像：" + url.lastPathComponent } }
+    private func chooseRecording() { let panel = NSOpenPanel(); panel.allowedFileTypes = ["rgrec"]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK, let url = panel.url { selectedRecording = url; library.deselectAll(nil); footer.stringValue = "已选择录像：" + url.lastPathComponent } }
     private func choosePlaybackKey() { let panel = NSOpenPanel(); panel.allowedFileTypes = ["rgkey"]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK, let url = panel.url { selectedKey = url; keyLabel.stringValue = url.lastPathComponent } }
     private func play() {
         stopPlayback()
-        guard let file = library.indexOfSelectedItem >= 0 ? libraryFiles[library.indexOfSelectedItem] : selectedRecording, let key = selectedKey else { footer.stringValue = "请选择录像和播放私钥"; return }
+        guard let file = library.selectedRow >= 0 ? libraryFiles[library.selectedRow] : selectedRecording, let key = selectedKey else { footer.stringValue = "请选择录像和播放私钥"; return }
         let secret = playbackPassword.stringValue; playbackPassword.stringValue = ""; footer.stringValue = "正在验证和解锁录像……"
         let request = playbackGeneration
         DispatchQueue.global(qos: .userInitiated).async {
-            do { let bytes = try Vault.decrypt(file, keyURL: key, password: secret); DispatchQueue.main.async { guard request == self.playbackGeneration && !self.terminating else { return }; self.movie = MemoryMovie(bytes); self.playerView.player = AVPlayer(playerItem: AVPlayerItem(asset: self.movie!.asset)); self.playerView.player?.play(); self.footer.stringValue = "正在播放；双击画面可全屏，Esc 退出" } }
+            do { let bytes = try Vault.decrypt(file, keyURL: key, password: secret); DispatchQueue.main.async { guard request == self.playbackGeneration && !self.terminating else { return }; self.movie = MemoryMovie(bytes); self.wantsPlayback = true; self.playingFile = file; self.durationSaved = false; self.playerView.player = AVPlayer(playerItem: AVPlayerItem(asset: self.movie!.asset)); self.playerView.player?.playImmediately(atRate: self.playbackSpeed); self.footer.stringValue = "正在播放；双击画面可全屏，Esc 退出" } }
             catch { DispatchQueue.main.async { if request == self.playbackGeneration { self.footer.stringValue = "播放失败：" + error.localizedDescription } } }
         }
     }
-    private func stopPlayback() { playbackGeneration += 1; if playerView.isInFullScreenMode { playerView.exitFullScreenMode(options: nil) }; playerView.player?.pause(); playerView.player?.replaceCurrentItem(with: nil); playerView.player = nil; movie = nil }
-    @objc private func toggleFullScreen() { if playerView.isInFullScreenMode { playerView.exitFullScreenMode(options: nil) } else if let screen = window.screen ?? NSScreen.main { playerView.enterFullScreenMode(screen, withOptions: [.fullScreenModeAllScreens: false]) } }
+    private func stopPlayback() { playbackGeneration += 1; seekGeneration += 1; wantsPlayback = false; if playbackSurface.isInFullScreenMode { playbackSurface.exitFullScreenMode(options: nil) }; playerView.player?.pause(); playerView.player?.replaceCurrentItem(with: nil); playerView.player = nil; movie = nil; timeline.isEnabled = false; timeline.doubleValue = 0; playbackClock.stringValue = "00:00:00 / --:--:--" }
+    @objc private func toggleFullScreen() { if playbackSurface.isInFullScreenMode { playbackSurface.exitFullScreenMode(options: nil) } else if let screen = window.screen ?? NSScreen.main { playbackSurface.enterFullScreenMode(screen, withOptions: [.fullScreenModeAllScreens: false]) } }
+    func numberOfRows(in tableView: NSTableView) -> Int { libraryFiles.count }
+    func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let file = libraryFiles[row]
+        return NSTextField(labelWithString: tableColumn?.identifier.rawValue == "duration" ? RecordingStorage.clock(RecordingStorage.duration(file)) : file.lastPathComponent)
+    }
+    private func refreshPlayback() {
+        guard let player = playerView.player, let item = player.currentItem else { return }
+        if item.status == .failed { footer.stringValue = "播放失败：" + (item.error?.localizedDescription ?? "视频无法解码"); stopPlayback(); return }
+        let length = item.duration.seconds, current = player.currentTime().seconds
+        guard length.isFinite, length > 0 else { return }
+        timeline.isEnabled = true; timeline.maxValue = length
+        if !timeline.isDragging { timeline.doubleValue = current.isFinite ? current : 0 }
+        playbackClock.stringValue = RecordingStorage.clock(current) + " / " + RecordingStorage.clock(length)
+        pauseButton.title = player.rate == 0 ? "继续" : "暂停"
+        if !durationSaved, let file = playingFile { durationSaved = true; try? RecordingStorage.saveDuration(file, seconds: length); library.reloadData() }
+    }
+    @objc private func scrub(_ sender: NSSlider) { seekPlayback(sender.doubleValue) }
+    private func skip(_ seconds: Double) { guard let player = playerView.player else { return }; seekPlayback(player.currentTime().seconds + seconds) }
+    private func seekPlayback(_ seconds: Double) {
+        guard let player = playerView.player, let item = player.currentItem, item.duration.seconds.isFinite, seconds.isFinite else { return }
+        let value = max(0, min(seconds, item.duration.seconds)); seekGeneration += 1; let request = seekGeneration
+        player.seek(to: CMTime(seconds: value, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { [weak self, weak player] finished in
+            DispatchQueue.main.async { if finished, let self, let player, self.playerView.player === player, self.seekGeneration == request, self.wantsPlayback { player.playImmediately(atRate: self.playbackSpeed) } }
+        }
+    }
+    private func togglePause() {
+        guard let player = playerView.player else { return }
+        if player.rate > 0 || wantsPlayback && player.timeControlStatus == .waitingToPlayAtSpecifiedRate { wantsPlayback = false; player.pause() } else { wantsPlayback = true; if let item = player.currentItem, item.duration.seconds.isFinite, player.currentTime().seconds >= item.duration.seconds - 0.1 { player.seek(to: .zero) }; player.playImmediately(atRate: playbackSpeed) }
+    }
+    @objc private func changeSpeed() { if let player = playerView.player, player.rate > 0 { player.rate = playbackSpeed } }
     private func saveAutoUpdate() { attempt { settings.autoUpdate = autoUpdate.state == .on; try settings.save(); footer.stringValue = "自动更新偏好已保存" } }
     private func checkUpdates() {
         guard !checkingUpdate && !updating else { return }; checkingUpdate = true; nextUpdateCheck = Date().addingTimeInterval(6 * 3600); updateStatus.stringValue = "正在检查 Gitee 正式发行版……"

@@ -24,7 +24,7 @@ Add-RecordingLabel '私钥密码（左侧，至少 12 位）             再次�
 $password = New-Object Windows.Forms.TextBox; $password.SetBounds(20,260,300,25); $password.UseSystemPasswordChar = $true; $form.Controls.Add($password)
 $confirm = New-Object Windows.Forms.TextBox; $confirm.SetBounds(335,260,305,25); $confirm.UseSystemPasswordChar = $true; $form.Controls.Add($confirm)
 Add-RecordingLabel '左侧密码，右侧确认。私钥和密码丢失后无法恢复录像，请另行备份。' 295
-Add-RecordingLabel '默认：5 分钟分段 / 最大 1280×720 / 5 帧每秒 / 400 kbps / 预留 512 MB' 320
+Add-RecordingLabel '默认：5 分钟分段 / 最高 1080p / 5 帧每秒 / 1 Mbps / 预留 512 MB' 320
 $save = New-Object Windows.Forms.Button; $save.Text = '保存设置'; $save.SetBounds(20,355,120,32); $form.Controls.Add($save)
 $play = New-Object Windows.Forms.Button; $play.Text = '打开加密录像'; $play.SetBounds(155,355,140,32); $form.Controls.Add($play)
 $status = New-Object Windows.Forms.Label; $status.SetBounds(20,395,620,45); $form.Controls.Add($status)
@@ -87,7 +87,7 @@ $save.Add_Click({
             # Keep the matching public key in memory even if saving the config needs a retry.
             $script:recordingConfig = [pscustomobject]@{publicKey=$publicKey;enabled=$false}
         }
-        $cfg = [ordered]@{schema=1;enabled=$true;directory=[IO.Path]::GetFullPath($folder.Text);ffmpeg=[IO.Path]::GetFullPath($encoder.Text);publicKey=$publicKey;segmentSeconds=300;fps=5;width=1280;bitrateKbps=400;maxStorageMB=[int]$quota.Value;minFreeMB=512}
+        $cfg = [ordered]@{schema=1;enabled=$true;directory=[IO.Path]::GetFullPath($folder.Text);ffmpeg=[IO.Path]::GetFullPath($encoder.Text);publicKey=$publicKey;segmentSeconds=300;fps=5;width=1920;bitrateKbps=1000;maxStorageMB=[int]$quota.Value;minFreeMB=512}
         $cfg | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath ($configPath + '.tmp') -Encoding UTF8
         Move-Item -LiteralPath ($configPath + '.tmp') -Destination $configPath -Force
         $script:recordingConfig = [pscustomobject]$cfg

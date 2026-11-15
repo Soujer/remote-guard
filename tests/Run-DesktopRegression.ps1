@@ -60,10 +60,30 @@ try{
         Add-Type -Path @((Join-Path $repo 'windows/RecordingCrypto.cs'),(Join-Path $repo 'windows/DesktopRuntime.cs'))
         $key=Join-Path $scratch 'test.rgkey';$password='temporary regression password';$public=[RemoteGuard.Vault]::CreateKey($key,$password)
         $clip=Join-Path $scratch 'synthetic.rgrec'
-        $capture=[RemoteGuard.Capture]::new($FFmpeg,'-hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=5 -t 1 -c:v libx264 -threads 2 -movflags +frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1',$public,$clip,2MB)
+        $capture=[RemoteGuard.Capture]::new($FFmpeg,'-hide_banner -loglevel error -f lavfi -i testsrc2=size=640x360:rate=5 -t 8 -c:v libx264 -threads 2 -movflags +frag_keyframe+empty_moov+default_base_moof -f mp4 pipe:1',$public,$clip,4MB)
         try{Start-Sleep -Seconds 1;$capture.Finish()}finally{$capture.Dispose()}
         $preview=[RemoteGuard.Preview]::new($clip,$key,$password,$FFmpeg);$frame=$null;$deadline=(Get-Date).AddSeconds(10)
-        try{while(-not $frame -and (Get-Date) -lt $deadline){$frame=$preview.TakeFrame();Start-Sleep -Milliseconds 50};Assert ($frame.Length -eq 640*360*4) 'Embedded player must decode authenticated video frames';Assert (-not $preview.Error) 'Embedded preview must not fail'}finally{$preview.Dispose()}
+        try{
+            while(-not $frame -and (Get-Date) -lt $deadline){$frame=$preview.TakeFrame();Start-Sleep -Milliseconds 50}
+            Assert ($frame.Length -eq [RemoteGuard.Preview]::Width*[RemoteGuard.Preview]::Height*4) 'Player must decode a full HD preview'
+            Assert (-not $preview.Error) 'Embedded preview must not fail'
+            Assert ($preview.Duration -ge 7.5 -and $preview.Duration -le 8.5) 'Read actual fragmented MP4 duration'
+            $preview.SetPaused($true);Start-Sleep -Milliseconds 150;$position=$preview.Position;Start-Sleep -Milliseconds 350
+            Assert ($preview.Position -eq $position) 'Pause must freeze playback position'
+            $preview.Seek(6);$frame=$null;$deadline=(Get-Date).AddSeconds(10)
+            while(-not $frame -and (Get-Date) -lt $deadline){$frame=$preview.TakeFrame();Start-Sleep -Milliseconds 30}
+            Assert ($frame -and $preview.Position -ge 5.8 -and $preview.Paused) 'Seeking while paused must render the requested frame and remain paused'
+            $preview.Seek(0);$preview.SetRate(2);$preview.SetPaused($false);$deadline=(Get-Date).AddSeconds(10)
+            while($preview.Position -gt 1 -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 30}
+            $position=$preview.Position;Start-Sleep -Milliseconds 1100
+            Assert ($preview.Position - $position -ge 1.4) 'Double speed must advance media time faster than real time'
+            $preview.SetRate(4);$deadline=(Get-Date).AddSeconds(8)
+            while(-not $preview.Done -and (Get-Date) -lt $deadline){Start-Sleep -Milliseconds 50}
+            Assert ($preview.Done -and -not $preview.Error) 'Playback must finish successfully after seeking and changing rate'
+            $preview.Seek(1);$preview.SetPaused($false);$frame=$null;$deadline=(Get-Date).AddSeconds(5)
+            while(-not $frame -and (Get-Date) -lt $deadline){$frame=$preview.TakeFrame();Start-Sleep -Milliseconds 30}
+            Assert ($frame -and -not $preview.Error) 'A completed recording must support seeking and replay'
+        }finally{$preview.Dispose()}
         $preview=[RemoteGuard.Preview]::new($clip,$key,'wrong password',$FFmpeg);$frame=$null;$deadline=(Get-Date).AddSeconds(10)
         try{while(-not $preview.Done -and (Get-Date) -lt $deadline){if($preview.TakeFrame()){$frame=$true};Start-Sleep -Milliseconds 50};Assert (-not $frame) 'Wrong password must never render a frame';Assert ([bool]$preview.Error) 'Wrong password must be reported'}finally{$preview.Dispose()}
     }

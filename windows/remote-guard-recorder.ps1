@@ -38,8 +38,10 @@ try {
             if ($drive.AvailableFreeSpace -lt ([long]$cfg.minFreeMB * 1MB + 1MB)) { break }
         }
         $capture.Finish()
+        $duration=$capture.DurationSeconds
         $capture.Dispose(); $capture = $null
         Move-Item -LiteralPath $partial -Destination $final -ErrorAction Stop
+        try { Set-GuardRecordingDuration $final $duration } catch { Write-RecordingLog ('时长记录失败: '+$_.Exception.Message) }
         Write-RecordingLog ('完成加密片段: ' + $name)
     }
 } catch {

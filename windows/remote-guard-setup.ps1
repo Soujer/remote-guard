@@ -16,7 +16,7 @@ trap {
     if($SmokeTest -and $InstallRoot){[void][IO.Directory]::CreateDirectory($InstallRoot);[IO.File]::WriteAllText((Join-Path $InstallRoot 'desktop-smoke-error.txt'),$_.ToString());exit 1}
     throw $_
 }
-if(-not $script:GuardBuildVersion){$script:GuardBuildVersion='1.3.2'}
+if(-not $script:GuardBuildVersion){$script:GuardBuildVersion='1.5.0'}
 # ============================================================
 
 Import-Module ScheduledTasks, CimCmdlets -ErrorAction Stop -WarningAction SilentlyContinue
@@ -547,6 +547,11 @@ if($SmokeTest){
     if(-not $libraryView.FullScreen -or $libraryView.Picture.Parent -ne $libraryView.FullScreen -or $libraryView.Picture.Dock -ne 'Fill'){throw 'Fullscreen must reuse the existing playback surface'}
     & $libraryView.FullScreenKeyAction $libraryView.FullScreen ([Windows.Forms.KeyEventArgs]::new([Windows.Forms.Keys]::Escape))
     if($libraryView.FullScreen -or $libraryView.Picture.Parent -ne $tabLibrary -or $libraryView.Picture.Bounds -ne $originalBounds -or $libraryView.Picture.IsDisposed){throw 'Escape must restore the embedded playback surface'}
+    & $libraryView.ToggleFullScreen $false
+    if($libraryView.ExitButton.ForeColor -ne [Drawing.Color]::Black -or $libraryView.ExitButton.BackColor -ne [Drawing.Color]::WhiteSmoke){throw 'Fullscreen exit button must have explicit contrasting colors'}
+    $click=[Windows.Forms.Button].GetMethod('OnClick',[Reflection.BindingFlags]'Instance,NonPublic')
+    [void]$click.Invoke($libraryView.ExitButton,@([EventArgs]::Empty))
+    if($libraryView.FullScreen -or $libraryView.Transport.Parent -ne $tabLibrary){throw 'Actual exit button click must restore picture and transport'}
     & $libraryView.ToggleFullScreen $false
     & $libraryView.StopAction
     if($libraryView.FullScreen){throw 'Stopping playback must close fullscreen'}

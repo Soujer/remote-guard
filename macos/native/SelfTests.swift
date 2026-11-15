@@ -95,9 +95,9 @@ enum SelfTests {
             try check(decoded == Data(base64Encoded: fixture["plaintext"]!), "Decrypt the Windows CNG interoperability fixture")
         }
         let movie = root.appendingPathComponent("synthetic.rgrec")
-        let encoder = try SegmentEncoder(url: movie, publicKey: publicKey, width: 640, height: 360, limit: 2_097_152)
+        let encoder = try SegmentEncoder(url: movie, publicKey: publicKey, width: 1920, height: 1080, limit: 2_097_152)
         var pixel: CVPixelBuffer?
-        let status = CVPixelBufferCreate(kCFAllocatorDefault, 640, 360, kCVPixelFormatType_32BGRA, [kCVPixelBufferCGImageCompatibilityKey: true, kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary, &pixel)
+        let status = CVPixelBufferCreate(kCFAllocatorDefault, 1920, 1080, kCVPixelFormatType_32BGRA, [kCVPixelBufferCGImageCompatibilityKey: true, kCVPixelBufferCGBitmapContextCompatibilityKey: true] as CFDictionary, &pixel)
         try check(status == kCVReturnSuccess && pixel != nil, "Create a synthetic video frame")
         CVPixelBufferLockBaseAddress(pixel!, []); memset(CVPixelBufferGetBaseAddress(pixel!), 120, CVPixelBufferGetDataSize(pixel!)); CVPixelBufferUnlockBaseAddress(pixel!, [])
         for index in 0..<15 { try encoder.append(pixel!, at: Double(index) / 5); Thread.sleep(forTimeInterval: 0.03) }; try encoder.finish()
@@ -105,11 +105,32 @@ enum SelfTests {
         try check(video.range(of: Data("ftyp".utf8)) != nil && video.range(of: Data("moof".utf8)) != nil, "Encode fragmented MP4 directly into encrypted storage")
         let memory = MemoryMovie(video), image = AVAssetImageGenerator(asset: memory.asset)
         let frame = try image.copyCGImage(at: CMTime(seconds: 0.2, preferredTimescale: 600), actualTime: nil)
-        try check(frame.width == 640 && frame.height == 360, "Decode an authenticated in-memory movie without a plaintext file")
+        try check(frame.width == 1920 && frame.height == 1080, "Decode authenticated 1080p video without a plaintext file")
         _ = NSApplication.shared
         let desktop = GuardDesktop(); desktop.buildWindow()
         try check(desktop.tabs.numberOfTabViewItems == 5, "Build all five native desktop pages")
-        try check(desktop.playerView.showsFullScreenToggleButton, "Embedded macOS playback must provide a full-screen control")
+        try check(desktop.playbackSurface.subviews.contains(desktop.playerView), "Fullscreen surface must include the video and transport controls")
+        try check(desktop.speed.numberOfItems == 6 && desktop.timeline.isContinuous == false, "Provide speed selection and a draggable seek timeline")
+        try check(memory.asset.duration.seconds >= 2.5 && memory.asset.duration.seconds <= 3.5, "Read actual fragmented movie duration for seeking")
+        try RecordingStorage.saveDuration(movie, seconds: encoder.duration)
+        try check(RecordingStorage.duration(movie) == encoder.duration, "Recording duration must round trip in portable metadata")
+        let lateFrame = try image.copyCGImage(at: CMTime(seconds: 2, preferredTimescale: 600), actualTime: nil)
+        try check(lateFrame.width == 1920, "Seek to a later frame of an authenticated memory-backed movie")
+        let nativePlayer = AVPlayer(playerItem: AVPlayerItem(asset: memory.asset))
+        let readyDeadline = Date().addingTimeInterval(10)
+        while nativePlayer.currentItem?.status == .unknown && Date() < readyDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        try check(nativePlayer.currentItem?.status == .readyToPlay, "Native playback must become ready from encrypted in-memory video")
+        var seekComplete = false
+        nativePlayer.seek(to: CMTime(seconds: 2, preferredTimescale: 600), toleranceBefore: .zero, toleranceAfter: .zero) { seekComplete = $0 }
+        let seekDeadline = Date().addingTimeInterval(10)
+        while !seekComplete && Date() < seekDeadline { RunLoop.current.run(until: Date().addingTimeInterval(0.05)) }
+        try check(seekComplete && abs(nativePlayer.currentTime().seconds - 2) < 0.25, "Native player must seek to the requested timestamp")
+        nativePlayer.playImmediately(atRate: 2); try check(nativePlayer.rate == 2, "Native player must accept double-speed playback"); nativePlayer.pause()
+        let originalSurfaceSize = desktop.playbackSurface.frame.size
+        desktop.playbackSurface.setFrameSize(NSSize(width: 1280, height: 720)); desktop.playbackSurface.layoutSubtreeIfNeeded()
+        let timelineBounds = desktop.timeline.convert(desktop.timeline.bounds, to: desktop.playbackSurface)
+        try check(timelineBounds.minY > 500 && timelineBounds.maxY <= 720, "Fullscreen resizing must keep transport controls visible below the video")
+        desktop.playbackSurface.setFrameSize(originalSurfaceSize)
         try check(NSApp.mainMenu?.item(at: 1)?.submenu?.item(withTitle: "粘贴")?.keyEquivalent == "v", "Native text fields must support the standard paste shortcut")
         let output = ProcessInfo.processInfo.environment["GUARD_TEST_OUTPUT"].map { URL(fileURLWithPath: $0) }
         if let output {

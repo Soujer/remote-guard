@@ -6,9 +6,9 @@
 
 ## 下载
 
-到 [Gitee 发行版](https://gitee.com/Soujer/remote-guard/releases) 或 [GitHub Releases](https://github.com/Soujer/remote-guard/releases) 下载对应平台发行版。Windows 当前版本 **v1.3.3**，macOS 原生桌面版 **v1.4.0**。
+到 [Gitee 发行版](https://gitee.com/Soujer/remote-guard/releases) 或 [GitHub Releases](https://github.com/Soujer/remote-guard/releases) 下载对应平台发行版。Windows 当前版本 **v1.5.0**，macOS 原生桌面版 **v1.5.0**。
 
-Windows 推荐直接下载 **`remote-guard-v1.3.3.exe`**。macOS 下载 **`remote-guard-macos-universal-v1.4.0.zip`**，同一个程序支持 Apple 芯片与 Intel，要求 macOS 13 或更新系统。两端均提供“监控、推送、加密录屏、录像播放、更新”，首次使用无需额外下载录屏组件；播放器支持全屏、双击切换与 Esc 退出。`remote-guard-setup.exe` 保留为 Windows 兼容入口。
+Windows 推荐直接下载 **`remote-guard-v1.5.0.exe`**。macOS 下载 **`remote-guard-macos-universal-v1.5.0.zip`**，同一个程序支持 Apple 芯片与 Intel，要求 macOS 13 或更新系统。两端均提供“监控、推送、加密录屏、录像播放、更新”，首次使用无需额外下载录屏组件；播放器支持全屏、双击切换、Esc 退出、暂停、前后跳转 10 秒、拖动进度及 0.5x～4x 倍速。`remote-guard-setup.exe` 保留为 Windows 兼容入口。
 
 | 平台 | 发行包 | 使用 |
 |---|---|---|
@@ -86,14 +86,16 @@ bash install-macos.sh         # 测试通道 + 注册 launchd + 启动即时监�
 在软件的 **“加密录屏”** 页面选择录像目录和存储上限。录屏组件已内置或由系统提供。首次启用需设置至少 12 位密码，并另存一份 `.rgkey` 播放私钥。程序只保存公钥；密码不会保存。私钥请备份到其他安全位置，与密码分开保管。**私钥或密码丢失，录像无法恢复。** 配置成功后，已启动的监控程序会在下一次确认远程会话时开始录制。
 
 - 只在确认的受控会话中录制，不因远控软件运行或可疑事件告警单独开始。多个远控同时连接只录一份；全部确认断开后停止。沿用检测器约 3 分钟的断开观察期，因此实际断开后可能继续录制这段时间。录屏从确认时开始，不能回溯之前的操作。
-- Windows 捕获当前用户桌面；macOS 捕获主显示器。画面缩放到最大 1280×720，5 帧/秒、H.264、约 400 kbps，无音频。参考大小约 **3 MB/分钟、15 MB/5 分钟、180 MB/小时**，实际随画面与编码开销变化。多显示器画面缩小后文字可能不清晰，帧率不适合游戏录像。
+- Windows 捕获当前用户桌面；macOS 捕获主显示器。录像最高 **1920×1080、5 帧/秒、H.264、约 1 Mbps、无音频**，低分辨率画面不放大，只缩放录像，不修改系统显示分辨率。每 5 分钟约 37.5 MB，2 GB（默认 2048 MB）约 4.5～4.8 小时，实际随画面与编码变化；静态画面通常可保存更久，帧率不适合游戏录像。
 - 每 5 分钟独立保存一份 `.rgrec` 加密片段，片段切换可能有短暂间隙。默认总上限 **2 GB**，预留下一段空间时自动删除最旧片段；另留至少 **512 MB** 磁盘空间，空间不足时停止并记录错误。请及时备份要保留的录像。容量上限包含本程序遗留的 `.partial` 文件，不清理其他文件。
 - MP4 压缩流经内存管道直接加密写盘，自动录屏不产生明文临时视频。采用 RSA-3072 OAEP-SHA256 包装随机 AES-256-CBC/HMAC-SHA256 密钥，每段独立随机密钥和 IV；播放先验证完整性，再通过内存管道解密和解码。`.rgkey` 私钥以 PBKDF2-HMAC-SHA256（210000 次迭代）派生密钥加密并校验完整性。
 - 播放：在 **“录像播放”** 页面选择 `.rgrec`、`.rgkey` 并输入密码，在主窗口内播放；点击“全屏”或双击画面放大，Esc 返回。Windows 使用内置 FFmpeg，macOS 使用系统 AVKit；均先验证录像完整性，再在内存中解密和解码，不写出明文视频。另一台电脑只需软件、匹配的私钥和录像即可播放，无需启用自动录屏。密钥与录像格式跨平台兼容；私钥和密码不通过命令行传递，也不会上传录像。
 - 录屏故障与推送相互独立。异常断电或强杀进程可能留下当前片段的 `.partial`，该片段不能保证恢复，之前完成的分段仍可播放。Windows 日志为安装目录 `recording.log`，macOS 为数据目录 `remote-guard.log`。持续故障每分钟重试。
 - Windows 64 位发行版内置 [Gyan FFmpeg 9.0.2](https://www.gyan.dev/ffmpeg/builds/)，自动释放到安装目录 `ffmpeg` 并核对固定 SHA-256。密码与确认密码分别校验，恰好 12 位且两次一致即可创建私钥，空格和大小写按原样保留。编码器路径也可自选，支持 Windows 10/11。使用 [FFmpeg 的 gdigrab](https://ffmpeg.org/ffmpeg-devices.html#gdigrab) 和 [分片 MP4](https://ffmpeg.org/ffmpeg-formats.html#mov_002c-mp4_002c-ismv)。macOS 使用 ScreenCaptureKit 捕获主显示器、AVAssetWriter 在内存输出分片 MP4 后直接加密。锁屏、安全桌面、受保护内容或断开后的 RDP 桌面可能无法捕获。
 
-Windows 高级参数位于安装目录 `recording.json`，默认录像目录为 `<安装目录>\recordings`。可以手动调整 `segmentSeconds`（30–900）、`fps`（1–15）、`width`（640–1920，按 16:9 限制高度）、`bitrateKbps`（100–2000）、`maxStorageMB`（128 MB–1 TB）与 `minFreeMB`（至少 128 MB）。设置页保存时使用默认编码参数。单段有严格字节上限，超限不会写满磁盘；未完成片段保留为 `.partial`。禁用录屏会保存当前片段后停止。
+录像列表显示时长。新片段完成时生成同名 `.rgrec.meta.json` 时长元数据（不含画面或密钥），容量清理会一起删除；旧录像解锁播放后补充实际时长，未读取的显示“待读取”。移动录像时可同时带上元数据，缺少元数据不影响播放。
+
+Windows 高级参数位于安装目录 `recording.json`，默认录像目录为 `<安装目录>\recordings`。可以手动调整 `segmentSeconds`（30–900）、`fps`（1–15）、`width`（640–1920，按 16:9 限制高度）、`bitrateKbps`（100–2000）、`maxStorageMB`（128 MB–1 TB）与 `minFreeMB`（至少 128 MB）。设置页保存时使用默认编码参数。旧版 1280 / 400 kbps 默认组合会升级为 1920 / 1000 kbps，其他手动参数保持。单段有严格字节上限，超限不会写满磁盘；未完成片段保留为 `.partial`。禁用录屏会保存当前片段后停止。
 
 ## Gitee 自动更新（Windows）
 
@@ -172,12 +174,12 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\tests\Run-Regression.p
 重新打包发行版（Windows，需要已安装 ps2exe，以及经校验的 FFmpeg 9.0.2 essentials 离线文件 `ffmpeg.exe`、`LICENSE`、`SOURCE.txt`）：
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.3.3 -EncoderDirectory C:\path\to\encoder
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\Build-Release.ps1 -Version 1.5.0 -EncoderDirectory C:\path\to\encoder
 ```
 
 产物写入 `release/`，包含 Windows 单文件 EXE、Windows ZIP、macOS TAR.GZ 和 SHA-256 校验文件；每个平台包内的 `VERSION` 记录版本及源码提交。EXE 内置程序资源，首次打开时自动释放到当前用户的版本目录，后续启动校验并修复缺失或损坏的资源。
 
-macOS 原生版在装有 Xcode 命令行工具的 Mac 上执行 `bash macos/build-macos.sh 1.4.0 release/macos`，生成包含 arm64 / x86_64 的通用 `.app`、ZIP 和独立校验清单。`.github/workflows/macos.yml` 在两种架构的 macOS runner 上分别构建、验证加密、合成画面编码、内存播放、更新校验与回滚。两端录像互通可用 `tests/Run-MacInteropRegression.ps1` 及 `macos/Tests/windows-interop.json` 公开测试样本验证。CI 验证不会捕获真实桌面或发送告警；真实屏幕授权与远控识别应在目标 Mac 上用测试录屏和实际会话核对。
+macOS 原生版在装有 Xcode 命令行工具的 Mac 上执行 `bash macos/build-macos.sh 1.5.0 release/macos`，生成包含 arm64 / x86_64 的通用 `.app`、ZIP 和独立校验清单。`.github/workflows/macos.yml` 在两种架构的 macOS runner 上分别构建、验证加密、合成画面编码、内存播放、更新校验与回滚。两端录像互通可用 `tests/Run-MacInteropRegression.ps1` 及 `macos/Tests/windows-interop.json` 公开测试样本验证。CI 验证不会捕获真实桌面或发送告警；真实屏幕授权与远控识别应在目标 Mac 上用测试录屏和实际会话核对。
 
 ## 已知限制
 

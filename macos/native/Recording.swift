@@ -6,6 +6,23 @@ import AVKit
 import UniformTypeIdentifiers
 
 enum RecordingStorage {
+    static let bitrate = 1_000_000
+    static func duration(_ file: URL) -> Double? {
+        guard let data = try? Vault.readBounded(file.appendingPathExtension("meta.json"), maximum: 4096),
+              let info = try? JSONSerialization.jsonObject(with: data) as? [String: Any], info["schema"] as? Int == 1,
+              let seconds = info["durationSeconds"] as? Double, seconds.isFinite, seconds > 0, seconds <= 86400,
+              let size = try? file.resourceValues(forKeys: [.fileSizeKey]).fileSize, info["bytes"] as? Int == size else { return nil }
+        return seconds
+    }
+    static func saveDuration(_ file: URL, seconds: Double) throws {
+        guard seconds.isFinite, seconds > 0, seconds <= 86400 else { return }
+        let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0
+        try JSONSerialization.data(withJSONObject: ["schema": 1, "durationSeconds": seconds, "bytes": size]).write(to: file.appendingPathExtension("meta.json"), options: .atomic)
+    }
+    static func clock(_ seconds: Double?) -> String {
+        guard let seconds, seconds.isFinite, seconds >= 0 else { return "待读取" }
+        let value = Int(seconds.rounded()); return String(format: "%02d:%02d:%02d", value / 3600, value / 60 % 60, value % 60)
+    }
     static func files(_ directory: URL) throws -> [URL] {
         guard fm.fileExists(atPath: directory.path) else { return [] }
         return try fm.contentsOfDirectory(at: directory, includingPropertiesForKeys: [.isSymbolicLinkKey, .isRegularFileKey, .contentModificationDateKey, .fileSizeKey]).filter {
@@ -26,7 +43,7 @@ enum RecordingStorage {
         try require(reserve <= limit, "单段录像预算超过存储上限")
         let files = try self.files(directory)
         var total = try files.reduce(0) { $0 + (try $1.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0) }
-        for file in files where total + reserve > limit { let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0; try fm.removeItem(at: file); total -= size }
+        for file in files where total + reserve > limit { let size = try file.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0; try fm.removeItem(at: file); try? fm.removeItem(at: file.appendingPathExtension("meta.json")); total -= size }
         let free = (try fm.attributesOfFileSystem(forPath: directory.path)[.systemFreeSize] as? NSNumber)?.int64Value ?? 0
         try require(free >= Int64(512 * 1_048_576 + reserve), "磁盘空间不足：录屏需预留 512 MB")
     }
@@ -40,13 +57,14 @@ final class SegmentEncoder: NSObject, AVAssetWriterDelegate {
     let asset: AVAssetWriter; let input: AVAssetWriterInput; let adaptor: AVAssetWriterInputPixelBufferAdaptor
     private let encrypted: RecordingWriter; private let lock = NSLock(); private var failure: Error?
     private var frames = 0
+    private(set) var duration: Double = 0
     init(url: URL, publicKey: String, width: Int, height: Int, limit: Int) throws {
         encrypted = try RecordingWriter(url, publicKey: publicKey, limit: limit)
         asset = AVAssetWriter(contentType: .mpeg4Movie)
         asset.outputFileTypeProfile = .mpeg4AppleHLS
         asset.preferredOutputSegmentInterval = CMTime(seconds: 2, preferredTimescale: 600)
         asset.initialSegmentStartTime = .zero
-        input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height, AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: 400_000, AVVideoExpectedSourceFrameRateKey: 5, AVVideoMaxKeyFrameIntervalKey: 10, AVVideoAllowFrameReorderingKey: false]])
+        input = AVAssetWriterInput(mediaType: .video, outputSettings: [AVVideoCodecKey: AVVideoCodecType.h264, AVVideoWidthKey: width, AVVideoHeightKey: height, AVVideoCompressionPropertiesKey: [AVVideoAverageBitRateKey: RecordingStorage.bitrate, AVVideoExpectedSourceFrameRateKey: 5, AVVideoMaxKeyFrameIntervalKey: 10, AVVideoAllowFrameReorderingKey: false]])
         input.expectsMediaDataInRealTime = true
         adaptor = AVAssetWriterInputPixelBufferAdaptor(assetWriterInput: input, sourcePixelBufferAttributes: [kCVPixelBufferPixelFormatTypeKey as String: kCVPixelFormatType_32BGRA, kCVPixelBufferWidthKey as String: width, kCVPixelBufferHeightKey as String: height])
         super.init(); asset.delegate = self
@@ -59,6 +77,7 @@ final class SegmentEncoder: NSObject, AVAssetWriterDelegate {
         guard input.isReadyForMoreMediaData else { return }
         try require(adaptor.append(pixel, withPresentationTime: CMTime(seconds: seconds, preferredTimescale: 600)), "视频帧编码失败")
         frames += 1
+        duration = seconds + 0.2
     }
     func assetWriter(_ writer: AVAssetWriter, didOutputSegmentData data: Data, segmentType: AVAssetSegmentType) {
         lock.lock(); defer { lock.unlock() }
@@ -67,7 +86,7 @@ final class SegmentEncoder: NSObject, AVAssetWriterDelegate {
     }
     func finish() throws {
         try require(frames > 0, "没有可录制的画面")
-        input.markAsFinished()
+        asset.endSession(atSourceTime: CMTime(seconds: duration, preferredTimescale: 600)); input.markAsFinished()
         let group = DispatchGroup(); group.enter(); asset.finishWriting { group.leave() }
         try require(group.wait(timeout: .now() + 20) == .success, "系统视频编码收尾超时")
         lock.lock(); defer { lock.unlock() }; if let failure { throw failure }
@@ -93,7 +112,8 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
                     guard request == self.generation else { return }; self.starting = false
                     do {
                         guard let content, let display = content.displays.first(where: { $0.displayID == CGMainDisplayID() }) ?? content.displays.first else { throw error ?? GuardError.message("未找到可录制的显示器") }
-                        let scale = min(1, min(1280.0 / Double(display.width), 720.0 / Double(display.height)))
+                        // Resize only the captured video buffers; never change the display mode.
+                        let scale = min(1, min(1920.0 / Double(display.width), 1080.0 / Double(display.height)))
                         self.width = max(2, Int(Double(display.width) * scale) / 2 * 2); self.height = max(2, Int(Double(display.height) * scale) / 2 * 2)
                         let configuration = SCStreamConfiguration(); configuration.width = self.width; configuration.height = self.height
                         configuration.minimumFrameInterval = CMTime(value: 1, timescale: 5); configuration.pixelFormat = kCVPixelFormatType_32BGRA
@@ -122,7 +142,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
         do {
             if encoder != nil && Double(DispatchTime.now().uptimeNanoseconds - began) / 1e9 >= Double(settings.segmentSeconds) { try closeSegment() }
             if encoder == nil {
-                let budget = Int(Double(settings.segmentSeconds) * 400_000 / 8 * 1.25) + 2_097_152
+                let budget = Int(Double(settings.segmentSeconds) * Double(RecordingStorage.bitrate) / 8 * 1.25) + 2_097_152
                 try RecordingStorage.prepare(settings, reserve: budget)
                 let url = URL(fileURLWithPath: settings.directory).appendingPathComponent(RecordingStorage.filename() + ".partial")
                 encoder = try SegmentEncoder(url: url, publicKey: settings.publicKey, width: width, height: height, limit: budget); partial = url; began = DispatchTime.now().uptimeNanoseconds
@@ -135,7 +155,7 @@ final class Recorder: NSObject, SCStreamOutput, SCStreamDelegate {
     private func closeSegment() throws {
         guard let encoder else { return }; defer { self.encoder = nil; partial = nil }
         try encoder.finish()
-        if let partial { try fm.moveItem(at: partial, to: partial.deletingPathExtension()); logGuard("加密片段已保存：" + partial.deletingPathExtension().lastPathComponent) }
+        if let partial { let final = partial.deletingPathExtension(); try fm.moveItem(at: partial, to: final); do { try RecordingStorage.saveDuration(final, seconds: encoder.duration) } catch { logGuard("时长记录失败：" + error.localizedDescription) }; logGuard("加密片段已保存：" + final.lastPathComponent) }
     }
     func stop(reason: String = "加密录屏待命", _ completion: (() -> Void)? = nil) {
         queue.async {

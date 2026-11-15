@@ -62,6 +62,10 @@ try {
     try { $writer.Write($inputBytes,$inputBytes.Length) } catch { $failed=$true } finally { try { $writer.Dispose() } catch { } }
     Assert $failed 'Hard segment byte limit must stop oversized streams'
     Assert ((Get-Item $bounded).Length -le 4096) 'Encrypted file must never exceed the hard byte limit'
+    Set-GuardRecordingDuration $recording 123.4
+    Assert ((Get-GuardRecordingDuration $recording) -eq 123.4) 'Persist actual duration without a private key'
+    [IO.File]::WriteAllText(($recording+'.meta.json'),'{"schema":1,"bytes":1,"durationSeconds":123}')
+    Assert ($null -eq (Get-GuardRecordingDuration $recording)) 'Ignore stale duration metadata for a different recording size'
 
     $now = [datetime]'2026-11-15T08:00:00Z'
     $instant = [pscustomobject]@{schema=3;updated=$now.ToString('o');activeTools=@('UU远程')}
@@ -91,32 +95,42 @@ try {
     $old=Join-Path $storage ('rg-20261115T010000000Z-' + [guid]::NewGuid().ToString('N') + '.rgrec')
     $new=Join-Path $storage ('rg-20261115T020000000Z-' + [guid]::NewGuid().ToString('N') + '.rgrec')
     foreach($path in @($old,$new)) {$file=[IO.File]::Create($path);$file.SetLength(64MB);$file.Dispose()}
+    Set-GuardRecordingDuration $old 300
     [IO.File]::SetLastWriteTimeUtc($old,[datetime]::UtcNow.AddHours(-1))
     $foreign=Join-Path $storage 'my-important-file.txt';[IO.File]::WriteAllText($foreign,'keep')
     $cfg=[pscustomobject]@{directory=$storage;maxStorageMB=128;minFreeMB=128}
     Limit-GuardRecordingStorage $cfg 1MB
     Assert (-not (Test-Path -LiteralPath $old)) 'Quota must remove oldest recording first'
+    Assert (-not (Test-Path -LiteralPath ($old+'.meta.json'))) 'Quota cleanup must also remove the recording duration metadata'
     Assert (Test-Path -LiteralPath $new) 'Quota must retain newest recording'
     Assert (Test-Path -LiteralPath $foreign) 'Quota must preserve unrelated files'
     $failed=$false;try {Limit-GuardRecordingStorage $cfg 129MB} catch {$failed=$true}
     Assert $failed 'Oversized segment reserve must be rejected before deleting recordings'
 
     if ($FFmpeg) {
+        $profile=[pscustomobject]@{schema=1;enabled=$true;directory=$scratch;ffmpeg=[IO.Path]::GetFullPath($FFmpeg);publicKey=$publicKey;segmentSeconds=300;fps=5;width=1280;bitrateKbps=400;maxStorageMB=2048;minFreeMB=512}
+        $profile|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $scratch 'recording.json') -Encoding UTF8
+        $upgraded=Get-GuardRecordingConfig $scratch
+        Assert ($upgraded.width -eq 1920 -and $upgraded.bitrateKbps -eq 1000 -and $upgraded.publicKey -ceq $publicKey) 'Upgrade the stock 720p profile without changing its encryption key'
+        $profile.width=640;$profile|ConvertTo-Json|Set-Content -LiteralPath (Join-Path $scratch 'recording.json') -Encoding UTF8
+        Assert ((Get-GuardRecordingConfig $scratch).width -eq 640) 'Preserve deliberate custom recording profiles'
         $clip=Join-Path $scratch 'synthetic.rgrec.partial'
-        $captureCfg=[pscustomobject]@{fps=5;width=1280;bitrateKbps=400;segmentSeconds=2}
+        $captureCfg=[pscustomobject]@{fps=5;width=1920;bitrateKbps=1000;segmentSeconds=2}
         $arguments=(Get-GuardRecordingArguments $captureCfg) -replace '-f gdigrab -framerate 5 -draw_mouse 1 -i desktop', '-re -f lavfi -i testsrc2=size=1920x1080:rate=5'
         $capture=[RemoteGuard.Capture]::new($FFmpeg,$arguments,$publicKey,$clip,2MB)
-        try {Start-Sleep -Seconds 3;$capture.Finish()} finally {$capture.Dispose()}
+        try {Start-Sleep -Seconds 3;$capture.Finish();Assert ($capture.DurationSeconds -ge 1.8 -and $capture.DurationSeconds -le 2.2) 'Recorder must obtain the actual completed segment duration'} finally {$capture.Dispose()}
         $video=New-Object IO.MemoryStream
         try {
             [RemoteGuard.Vault]::Decrypt($clip,$key,$password,$video)
             Assert ($video.Length -gt 1024) 'Synthetic capture must produce a nonempty encrypted MP4'
             $p=New-Object Diagnostics.Process
-            $p.StartInfo=New-Object Diagnostics.ProcessStartInfo($FFmpeg,'-hide_banner -loglevel error -i pipe:0 -f null -')
+            $p.StartInfo=New-Object Diagnostics.ProcessStartInfo($FFmpeg,'-hide_banner -loglevel info -i pipe:0 -f null -')
             $p.StartInfo.UseShellExecute=$false;$p.StartInfo.CreateNoWindow=$true;$p.StartInfo.RedirectStandardInput=$true;$p.StartInfo.RedirectStandardError=$true
             [void]$p.Start();$err=$p.StandardError.ReadToEndAsync()
             $video.Position=0;$video.CopyTo($p.StandardInput.BaseStream);$p.StandardInput.Close();$p.WaitForExit()
-            Assert ($p.ExitCode -eq 0) ('Decrypted synthetic MP4 must decode: '+$err.Result);$p.Dispose()
+            Assert ($p.ExitCode -eq 0) ('Decrypted synthetic MP4 must decode: '+$err.Result)
+            Assert ($err.Result -match '1920x1080') 'Encoded recording must retain a real 1080p source'
+            $p.Dispose()
         } finally {$video.Dispose()}
         $earlyClip=Join-Path $scratch 'early-stop.partial'
         $longArguments=$arguments -replace '-t 2 ', '-t 60 '

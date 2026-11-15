@@ -1,6 +1,6 @@
 ﻿param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '1.3.2',
+    [string]$Version = '1.5.0',
     [string]$OutputDirectory,
     [string]$EncoderDirectory
 )

@@ -8,6 +8,16 @@ using System.Threading.Tasks;
 #pragma warning disable SYSLIB0060 // Framework 4.8 compatibility: the static PBKDF2 API is unavailable there.
 
 namespace RemoteGuard {
+    public static class MediaProgress {
+        public static double Duration(string progress) {
+            double result=0;
+            foreach(string line in progress.Split('\n')) {
+                double value;
+                if(line.StartsWith("out_time_us=",StringComparison.Ordinal) && Double.TryParse(line.Substring(12).Trim(),System.Globalization.NumberStyles.Float,System.Globalization.CultureInfo.InvariantCulture,out value)) result=Math.Max(result,value/1000000);
+            }
+            return result;
+        }
+    }
     // v1: magic(8), wrapped-key length(4 LE), RSA-OAEP-SHA256(AES key || MAC key),
     // IV(16), AES-256-CBC ciphertext, HMAC-SHA256(header || ciphertext).
     public static class Vault {
@@ -185,6 +195,7 @@ namespace RemoteGuard {
     public sealed class Capture : IDisposable {
         readonly Process process; readonly Task pump; readonly Task<string> errors;
         public bool Done { get { return pump.IsCompleted || process.HasExited; } }
+        public double DurationSeconds { get; private set; }
         public Capture(string executable, string arguments, string publicKey, string path, long maximum) {
             process = new Process();
             process.StartInfo = new ProcessStartInfo(executable, arguments) { UseShellExecute = false,
@@ -209,6 +220,7 @@ namespace RemoteGuard {
             if (!pump.Wait(10000)) throw new IOException("Encryption worker did not finish");
             process.WaitForExit();
             if (process.ExitCode != 0) throw new IOException("FFmpeg failed: " + errors.Result);
+            DurationSeconds = MediaProgress.Duration(errors.Result);
         }
         public void Dispose() {
             try { if (!process.HasExited) process.Kill(); pump.Wait(10000); }

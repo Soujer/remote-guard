@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 cd "$(dirname "$0")/.."
-version="${1:-1.4.0}"
+version="${1:-1.5.0}"
 out="${2:-release/macos}"
 case "$version" in *[!0-9.]*|'') echo 'Invalid release version' >&2; exit 1;; esac
 mkdir -p "$out"
