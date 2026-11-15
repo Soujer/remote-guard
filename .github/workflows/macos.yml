@@ -1,0 +1,31 @@
+name: macOS universal app
+on:
+  push:
+    paths: ['macos/**', '.github/workflows/macos.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build-test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build both architectures
+        run: bash macos/build-macos.sh 1.4.0 release/macos
+      - name: Test native encryption, detection and memory-only video playback
+        env:
+          GUARD_TEST_OUTPUT: release/macos/tests
+        run: release/macos/RemoteGuard.app/Contents/MacOS/RemoteGuard --self-test
+      - uses: actions/upload-artifact@v4
+        with:
+          name: remote-guard-${{ matrix.os }}
+          path: |
+            release/macos/remote-guard-macos-universal-v1.4.0.zip
+            release/macos/SHA256SUMS-macos-v1.4.0.txt
+            release/macos/tests/macOS-interop.json
+            release/macos/tests/macos-interop.json
