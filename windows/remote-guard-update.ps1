@@ -34,9 +34,9 @@ try {
         $response=$client.GetAsync($update.ZipUrl,[Net.Http.HttpCompletionOption]::ResponseHeadersRead).GetAwaiter().GetResult()
         try {
             [void]$response.EnsureSuccessStatusCode()
-            if($response.Content.Headers.ContentLength -gt 32MB){throw '更新包超过大小限制'}
+            if($response.Content.Headers.ContentLength -gt 128MB){throw '更新包超过大小限制'}
             $downloadStream=$response.Content.ReadAsStreamAsync().GetAwaiter().GetResult();$output=[IO.File]::Create($zipPath)
-            try {$buffer=New-Object byte[] 65536;$total=0;while(($count=$downloadStream.Read($buffer,0,$buffer.Length)) -gt 0){$total+=$count;if($total -gt 32MB){throw '更新包超过大小限制'};$output.Write($buffer,0,$count)}}finally{$output.Dispose();$downloadStream.Dispose()}
+            try {$buffer=New-Object byte[] 65536;$total=0;while(($count=$downloadStream.Read($buffer,0,$buffer.Length)) -gt 0){$total+=$count;if($total -gt 128MB){throw '更新包超过大小限制'};$output.Write($buffer,0,$count)}}finally{$output.Dispose();$downloadStream.Dispose()}
         }finally{$response.Dispose()}
     }finally{$client.Dispose()}
     if((Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash -ine $expected){throw '更新包 SHA-256 校验失败'}

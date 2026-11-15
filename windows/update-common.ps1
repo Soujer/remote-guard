@@ -22,7 +22,11 @@ function Select-GuardUpdate([array]$Releases, [version]$Current) {
         if ($release.prerelease -or $release.draft -or [string]$release.tag_name -notmatch '^v(\d+\.\d+\.\d+)$') { continue }
         $version = [version]$Matches[1]
         if ($version -le $Current) { continue }
-        $zipName = 'remote-guard-windows-v' + $version + '.zip'
+        # Older updaters skip this name and first install the small v1.3.1 bridge.
+        $zipName = 'remote-guard-windows-bundled-v' + $version + '.zip'
+        if (@($release.assets | Where-Object name -eq $zipName).Count -eq 0) {
+            $zipName = 'remote-guard-windows-v' + $version + '.zip'
+        }
         $hashName = 'SHA256SUMS-v' + $version + '.txt'
         $zip = @($release.assets | Where-Object name -eq $zipName)
         $hash = @($release.assets | Where-Object name -eq $hashName)
@@ -57,7 +61,7 @@ function Expand-GuardUpdate([string]$ZipPath, [string]$Destination, [version]$Ex
             if ($allowed -cnotcontains $entry.FullName -or $seen.ContainsKey($entry.FullName.ToLowerInvariant())) { throw '安装包包含重复、未知文件或不安全路径' }
             $seen[$entry.FullName.ToLowerInvariant()] = $true
             $total += $entry.Length
-            if ($entry.Length -gt 16MB -or $total -gt 64MB) { throw '安装包解压大小超限' }
+            if ($entry.Length -gt 64MB -or $total -gt 256MB) { throw '安装包解压大小超限' }
         }
         foreach ($name in $allowed) { if (-not $seen.ContainsKey($name.ToLowerInvariant())) { throw ('安装包缺少文件: ' + $name) } }
         [void][IO.Directory]::CreateDirectory($Destination)

@@ -14,6 +14,10 @@ Assert ($selected.Version -eq '1.10.0') 'Version selection must use numerical ve
 Assert ($null -eq (Select-GuardUpdate @((Release '1.2.0')) ([version]'1.3.0'))) 'Never downgrade'
 $incomplete=Release '2.0.0';$incomplete.assets=@($incomplete.assets[0])
 Assert ($null -eq (Select-GuardUpdate @($incomplete) ([version]'1.3.0'))) 'Skip releases without checksum assets'
+$bundled=Release '1.3.2'
+$bundled.assets[0].name='remote-guard-windows-bundled-v1.3.2.zip'
+$bundled.assets[0].browser_download_url='https://gitee.com/Soujer/remote-guard/releases/download/v1.3.2/remote-guard-windows-bundled-v1.3.2.zip'
+Assert ((Select-GuardUpdate @((Release '1.3.1'),$bundled) ([version]'1.3.0')).Version -eq '1.3.2') 'Updated updater must accept bundled releases and still support bridge packages'
 $foreign=Release '2.0.0';$foreign.assets[0].browser_download_url='https://evil.example/package.zip'
 Assert ($null -eq (Select-GuardUpdate @($foreign) ([version]'1.3.0'))) 'Reject release assets outside the fixed Gitee repository'
 $hash='a'*64
